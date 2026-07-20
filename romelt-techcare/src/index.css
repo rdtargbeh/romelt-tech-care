@@ -1,0 +1,224 @@
+/**
+ * ================================================================
+ * ROMELT TECHCARE — GLOBAL STYLES AND DESIGN SYSTEM
+ * ================================================================
+ *
+ * Purpose:
+ * Defines the global visual system for the public Romelt TechCare
+ * website.
+ *
+ * Responsibilities:
+ * - Loads Tailwind CSS v4.
+ * - Defines the brand colors, fonts, spacing, shadows, and radiuses.
+ * - Establishes consistent defaults for typography and page behavior.
+ * - Provides reusable utility classes for common website elements.
+ *
+ * Real-data integration:
+ * This file contains presentation rules only. Customer, booking,
+ * pricing, and service data must come from application data sources
+ * or backend APIs rather than being embedded in CSS.
+ * ================================================================
+ */
+
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+
+  --font-display:
+    "Plus Jakarta Sans", Inter, ui-sans-serif, system-ui, sans-serif;
+
+  --color-brand-50: #effcfb;
+  --color-brand-100: #d7f7f3;
+  --color-brand-200: #b3eee8;
+  --color-brand-300: #7fdfd7;
+  --color-brand-400: #49c8c0;
+  --color-brand-500: #28aba5;
+  --color-brand-600: #1d8986;
+  --color-brand-700: #1b6e6c;
+  --color-brand-800: #1b5858;
+  --color-brand-900: #1a4949;
+  --color-brand-950: #092b2c;
+
+  --color-navy-50: #f3f7fb;
+  --color-navy-100: #e6eef6;
+  --color-navy-200: #c7ddeb;
+  --color-navy-300: #96c0d8;
+  --color-navy-400: #5d9fbe;
+  --color-navy-500: #3c82a5;
+  --color-navy-600: #2c6688;
+  --color-navy-700: #28536e;
+  --color-navy-800: #26465c;
+  --color-navy-900: #223b4e;
+  --color-navy-950: #102738;
+
+  --color-warm-50: #fffaf0;
+  --color-warm-100: #fff1d2;
+  --color-warm-200: #ffe0a3;
+  --color-warm-300: #ffca6d;
+  --color-warm-400: #ffad32;
+  --color-warm-500: #f9900a;
+  --color-warm-600: #dd6d05;
+  --color-warm-700: #b74a08;
+  --color-warm-800: #94390e;
+  --color-warm-900: #79300f;
+
+  --shadow-soft: 0 18px 60px -30px rgba(16, 39, 56, 0.35);
+
+  --shadow-card: 0 20px 45px -24px rgba(16, 39, 56, 0.28);
+
+  --radius-card: 1.5rem;
+}
+
+:root {
+  font-family: var(--font-sans);
+  color: #17202a;
+  background-color: #ffffff;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+  background:
+    radial-gradient(
+      circle at 10% 0%,
+      rgba(40, 171, 165, 0.08),
+      transparent 30rem
+    ),
+    #ffffff;
+}
+
+body,
+button,
+input,
+textarea,
+select {
+  font-family: inherit;
+}
+
+button,
+a {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button {
+  cursor: pointer;
+}
+
+img,
+svg {
+  display: block;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+::selection {
+  color: #ffffff;
+  background: #1d8986;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.site-section {
+  padding-block: 4.5rem;
+}
+
+.site-section-sm {
+  padding-block: 3.5rem;
+}
+
+.site-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-brand-700);
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.site-card {
+  border: 1px solid rgba(199, 221, 235, 0.7);
+  border-radius: var(--radius-card);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: var(--shadow-card);
+}
+
+.focus-ring {
+  outline: none;
+}
+
+.focus-ring:focus-visible {
+  box-shadow:
+    0 0 0 3px #ffffff,
+    0 0 0 6px rgba(29, 137, 134, 0.65);
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+.text-pretty {
+  text-wrap: pretty;
+}
+
+/**
+ * ================================================================
+ * SCREEN-READER-ONLY CONTENT
+ * ================================================================
+ *
+ * Purpose:
+ * Visually hides accessibility text while keeping it available to
+ * screen readers and other assistive technologies.
+ * ================================================================
+ */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  white-space: nowrap;
+  border-width: 0;
+  clip: rect(0, 0, 0, 0);
+}
+
+@media (min-width: 640px) {
+  .site-section {
+    padding-block: 5.5rem;
+  }
+
+  .site-section-sm {
+    padding-block: 4.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .site-section {
+    padding-block: 7rem;
+  }
+
+  .site-section-sm {
+    padding-block: 5.5rem;
+  }
+}
