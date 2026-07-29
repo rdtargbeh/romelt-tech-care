@@ -14,17 +14,27 @@
  * - Handles empty and non-JSON responses safely.
  * - Converts failed responses into ApiError instances.
  * - Supports authenticated and public requests.
- * - Prevents repeated low-level fetch logic across the application.
+ * - Attaches the administrator bearer token when required.
+ * - Clears invalid administrator sessions after HTTP 401 responses.
  *
  * Real-data integration:
- * Authentication-token retrieval should be connected when customer
- * and administrative authentication are implemented.
+ * Public and administrative services use this client for all Spring
+ * Boot API communication.
+ *
+ * Security:
+ * - Access tokens are read through the centralized session service.
+ * - Tokens are attached only when requireAuthentication is true.
+ * - Request bodies and tokens are never written to logs.
  * ================================================================
  */
 
 import { environmentConfig } from "@/config/environment.config";
 import { ApiError } from "@/lib/api-error";
 import { logger } from "@/lib/logger";
+import {
+  clearAdminSession,
+  getAdminAccessToken,
+} from "@/services/admin-session";
 import type {
   ApiErrorResponse,
   ApiFieldError,
@@ -130,7 +140,7 @@ class ApiClient {
       }
 
       if (requireAuthentication) {
-        const accessToken = getAccessToken();
+        const accessToken = getAdminAccessToken();
 
         if (!accessToken) {
           throw new ApiError({
@@ -158,6 +168,10 @@ class ApiClient {
       const responseBody = await parseResponseBody(response);
 
       if (!response.ok) {
+        if (response.status === 401 && requireAuthentication) {
+          clearAdminSession();
+        }
+
         throw createApiError(response, responseBody);
       }
 
@@ -203,16 +217,6 @@ class ApiClient {
 }
 
 export const apiClient = new ApiClient(environmentConfig.apiBaseUrl);
-
-function getAccessToken(): string | null {
-  /*
-   * Authentication has not yet been implemented.
-   *
-   * Replace this function with the centralized authentication-session
-   * service when customer and administrative portals are added.
-   */
-  return null;
-}
 
 function serializeRequestBody(body: unknown): BodyInit | undefined {
   if (body === undefined || body === null) {
@@ -337,6 +341,9 @@ function getDefaultErrorMessage(status: number): string {
 
     case 409:
       return "The request conflicts with an existing record.";
+
+    case 423:
+      return "This account is currently locked.";
 
     case 422:
       return "Some submitted information could not be processed.";

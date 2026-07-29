@@ -1009,6 +1009,11 @@ function SensitiveInformationCard() {
 }
 
 function ContactCard() {
+  const hasPhone =
+    Boolean(businessPhoneHref) && Boolean(businessConfig.phoneDisplay);
+
+  const hasEmail = Boolean(businessEmailHref) && Boolean(businessConfig.email);
+
   return (
     <div className="rounded-2xl bg-navy-950 p-6 text-white shadow-sm">
       <h2 className="font-display text-xl font-extrabold">
@@ -1016,23 +1021,34 @@ function ContactCard() {
       </h2>
 
       <div className="mt-5 space-y-4">
-        <a
-          href={businessPhoneHref}
-          className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
-        >
-          <Phone className="h-5 w-5" aria-hidden="true" />
+        {hasPhone && (
+          <a
+            href={businessPhoneHref ?? undefined}
+            className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
+          >
+            <Phone className="h-5 w-5 shrink-0" aria-hidden="true" />
 
-          <span>{businessConfig.phoneDisplay}</span>
-        </a>
+            <span>{businessConfig.phoneDisplay}</span>
+          </a>
+        )}
 
-        <a
-          href={businessEmailHref}
-          className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
-        >
-          <Mail className="h-5 w-5" aria-hidden="true" />
+        {hasEmail && (
+          <a
+            href={businessEmailHref ?? undefined}
+            className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
+          >
+            <Mail className="h-5 w-5 shrink-0" aria-hidden="true" />
 
-          <span className="break-all">{businessConfig.email}</span>
-        </a>
+            <span className="break-all">{businessConfig.email}</span>
+          </a>
+        )}
+
+        {!hasPhone && !hasEmail && (
+          <p className="text-sm leading-6 text-slate-300">
+            Submit the contact form and the Romelt TechCare team will respond as
+            soon as possible.
+          </p>
+        )}
       </div>
 
       <Link

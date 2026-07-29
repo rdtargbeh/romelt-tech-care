@@ -203,6 +203,16 @@ a {
   clip: rect(0, 0, 0, 0);
 }
 
+@media (min-width: 440px) {
+  .site-section {
+    padding-block: 3.5rem;
+  }
+
+  .site-section-sm {
+    padding-block: 1.8rem;
+  }
+}
+
 @media (min-width: 640px) {
   .site-section {
     padding-block: 5.5rem;

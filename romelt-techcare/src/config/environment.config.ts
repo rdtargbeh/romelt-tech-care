@@ -4,27 +4,29 @@
  * ================================================================
  *
  * Purpose:
- * Provides one safe and centralized source for all frontend
- * environment variables.
+ * Provides one centralized and validated source for all frontend
+ * environment variables used by Romelt TechCare.
  *
  * Responsibilities:
  * - Reads Vite environment variables.
  * - Provides safe local-development defaults.
- * - Normalizes website and API URLs.
+ * - Normalizes website and backend API URLs.
  * - Converts string feature flags into booleans.
  * - Detects development, test, staging, and production modes.
- * - Prevents the application from crashing when local environment
- *   files have not yet been created.
+ * - Enables real backend integration by default in development.
  * - Prevents application files from reading import.meta.env directly.
  *
  * Real-data integration:
- * Production deployment values should be supplied through the
- * production hosting environment or `.env.production`.
+ * Local development connects to:
+ * http://localhost:8080/api/v1
+ *
+ * Production values must be supplied through `.env.production`
+ * or the production hosting platform.
  *
  * Security:
  * Every variable beginning with VITE_ is exposed to the browser.
- * Never place passwords, private keys, database credentials, tokens,
- * or other secrets in VITE_ environment variables.
+ * Never store passwords, private keys, database credentials,
+ * access tokens, or other secrets in VITE_ variables.
  * ================================================================
  */
 
@@ -50,15 +52,6 @@ interface EnvironmentConfig {
   isProduction: boolean;
 }
 
-/**
- * Safe frontend defaults.
- *
- * These values allow the application to start even when no `.env`
- * file exists.
- *
- * Production values should still be configured through the hosting
- * environment or `.env.production`.
- */
 const DEFAULT_DEVELOPMENT_SITE_URL = "http://localhost:5173";
 
 const DEFAULT_DEVELOPMENT_API_BASE_URL = "http://localhost:8080/api/v1";
@@ -71,6 +64,9 @@ const appEnvironment = parseApplicationEnvironment(
   import.meta.env.VITE_APP_ENV,
 );
 
+const isDevelopment = appEnvironment === "development";
+const isTest = appEnvironment === "test";
+const isStaging = appEnvironment === "staging";
 const isProduction = appEnvironment === "production";
 
 const siteUrl = normalizeUrl(
@@ -89,38 +85,57 @@ const apiBaseUrl = normalizeUrl(
   "VITE_API_BASE_URL",
 );
 
+/*
+ * Real public API integration is enabled by default outside tests.
+ *
+ * Environment files may still explicitly disable either API by
+ * setting its value to false.
+ */
+const defaultPublicApiEnabled = !isTest;
+
+const enableDebugLogging = parseBoolean(
+  import.meta.env.VITE_ENABLE_DEBUG_LOGGING,
+  !isProduction,
+  "VITE_ENABLE_DEBUG_LOGGING",
+);
+
+const enableContactApi = parseBoolean(
+  import.meta.env.VITE_ENABLE_CONTACT_API,
+  defaultPublicApiEnabled,
+  "VITE_ENABLE_CONTACT_API",
+);
+
+const enableBookingApi = parseBoolean(
+  import.meta.env.VITE_ENABLE_BOOKING_API,
+  defaultPublicApiEnabled,
+  "VITE_ENABLE_BOOKING_API",
+);
+
 export const environmentConfig: Readonly<EnvironmentConfig> = Object.freeze({
   appEnvironment,
 
   siteUrl,
   apiBaseUrl,
 
-  enableDebugLogging: parseBoolean(
-    import.meta.env.VITE_ENABLE_DEBUG_LOGGING,
-    !isProduction,
-    "VITE_ENABLE_DEBUG_LOGGING",
-  ),
+  enableDebugLogging,
+  enableContactApi,
+  enableBookingApi,
 
-  enableContactApi: parseBoolean(
-    import.meta.env.VITE_ENABLE_CONTACT_API,
-    false,
-    "VITE_ENABLE_CONTACT_API",
-  ),
-
-  enableBookingApi: parseBoolean(
-    import.meta.env.VITE_ENABLE_BOOKING_API,
-    false,
-    "VITE_ENABLE_BOOKING_API",
-  ),
-
-  isDevelopment: appEnvironment === "development",
-
-  isTest: appEnvironment === "test",
-
-  isStaging: appEnvironment === "staging",
-
+  isDevelopment,
+  isTest,
+  isStaging,
   isProduction,
 });
+
+if (enableDebugLogging) {
+  console.info("[Romelt TechCare] Environment configuration loaded.", {
+    appEnvironment,
+    siteUrl,
+    apiBaseUrl,
+    enableContactApi,
+    enableBookingApi,
+  });
+}
 
 function parseApplicationEnvironment(
   value: string | undefined,
@@ -169,8 +184,8 @@ function parseBoolean(
   }
 
   console.warn(
-    `[Environment] ${variableName} contains an invalid boolean ` +
-      `value "${value}". Using fallback value "${fallback}".`,
+    `[Environment] ${variableName} contains invalid boolean value ` +
+      `"${value}". Using fallback value "${fallback}".`,
   );
 
   return fallback;
@@ -182,20 +197,19 @@ function normalizeUrl(
   variableName: string,
 ): string {
   const candidate = value?.trim() || fallback;
-
   const normalizedValue = candidate.replace(/\/+$/, "");
 
   try {
     const parsedUrl = new URL(normalizedValue);
 
     if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      throw new Error("Only HTTP and HTTPS are supported.");
+      throw new Error("Only HTTP and HTTPS URLs are supported.");
     }
 
     return normalizedValue;
   } catch {
     console.warn(
-      `[Environment] ${variableName} contains an invalid URL ` +
+      `[Environment] ${variableName} contains invalid URL ` +
         `"${candidate}". Using fallback URL "${fallback}".`,
     );
 

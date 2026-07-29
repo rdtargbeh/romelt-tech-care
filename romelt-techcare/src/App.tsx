@@ -4,26 +4,30 @@
  * ================================================================
  *
  * Purpose:
- * Initializes the website router and shared application-level
- * services used across all public routes.
+ * Initializes the Romelt TechCare application router and shared
+ * application-level services used across public and administrator
+ * routes.
  *
  * Responsibilities:
- * - Provides BrowserRouter context.
+ * - Provides BrowserRouter context to the entire application.
  * - Activates route-based SEO metadata.
  * - Adds LocalBusiness structured data.
  * - Provides global route accessibility management.
  * - Restores page position when routes change.
  * - Provides the reusable floating Scroll to Top button.
- * - Renders all public application routes.
+ * - Renders all public and administrator application routes.
  *
  * Real-data integration:
- * Authentication providers, API-query providers, notification
- * providers, customer sessions, and backend data services may be
- * added here as application functionality is implemented.
+ * Administrator authentication is provided globally through
+ * AdminAuthProvider in src/main.tsx.
+ *
+ * Additional API-query, notification, analytics, customer-session,
+ * and error-monitoring providers may be added as new application
+ * functionality is implemented.
  * ================================================================
  */
 
-import { BrowserRouter } from "react-router";
+import { BrowserRouter } from "react-router-dom";
 
 import { AccessibilityManager } from "@/components/accessibility/AccessibilityManager";
 import { ScrollToTop } from "@/components/common/ScrollToTop";
