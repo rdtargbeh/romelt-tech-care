@@ -4,20 +4,25 @@
  * ================================================================
  *
  * Purpose:
- * Provides a temporary text-and-icon brand mark for the website.
+ * Displays the temporary image-based business logo throughout the
+ * Romelt TechCare public website.
  *
  * Responsibilities:
- * - Displays the Romelt TechCare name consistently.
- * - Supports light and dark backgrounds.
- * - Links to the homepage when rendered in navigational areas.
+ * - Displays the temporary logo consistently.
+ * - Links the logo to the public homepage.
+ * - Supports light and default background variants.
+ * - Optionally displays the Romelt TechCare tagline.
+ * - Maintains accessible alternative text.
+ *
+ * Temporary logo asset:
+ * public/image/logo-1.png
  *
  * Real-data integration:
- * This temporary mark should be replaced with finalized professional
- * logo assets without changing the consuming layout components.
+ * This temporary image should later be replaced with the finalized
+ * Romelt TechCare logo without changing consuming layout components.
  * ================================================================
  */
 
-import { HeartHandshake } from "lucide-react";
 import { Link } from "react-router";
 
 interface BrandLogoProps {
@@ -29,38 +34,27 @@ export function BrandLogo({
   variant = "default",
   showTagline = false,
 }: BrandLogoProps) {
-  const primaryText = variant === "light" ? "text-white" : "text-navy-950";
-
-  const secondaryText =
-    variant === "light" ? "text-brand-200" : "text-brand-700";
+  const taglineColor = variant === "light" ? "text-white" : "text-[#0B2545]";
 
   return (
     <Link
       to="/"
       aria-label="Romelt TechCare home"
-      className="focus-ring inline-flex items-center gap-3 rounded-xl"
+      className="focus-ring inline-flex flex-col items-start rounded-xl"
     >
-      <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-brand-500 text-white shadow-lg shadow-brand-950/15">
-        <HeartHandshake aria-hidden="true" className="h-6 w-6" />
-      </span>
+      <img
+        src="/image/logo-1.png"
+        alt="Romelt TechCare"
+        className="h-auto w-44 object-contain sm:w-52"
+      />
 
-      <span className="flex flex-col">
+      {showTagline ? (
         <span
-          className={`font-display text-lg font-extrabold tracking-[-0.035em] ${primaryText}`}
+          className={`mt-1 pl-1 text-[0.65rem] font-bold tracking-wide ${taglineColor}`}
         >
-          Romelt <span className={secondaryText}>TechCare</span>
+          Hassle-Free Technology. Honest Service.
         </span>
-
-        {showTagline ? (
-          <span
-            className={`text-[0.65rem] font-semibold tracking-wide ${
-              variant === "light" ? "text-slate-300" : "text-slate-500"
-            }`}
-          >
-            Hassle-Free Technology
-          </span>
-        ) : null}
-      </span>
+      ) : null}
     </Link>
   );
 }

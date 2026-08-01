@@ -1,0 +1,135 @@
+package romelt_techcare.backend.dto;
+
+import jakarta.validation.constraints.DecimalMax;
+import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.PositiveOrZero;
+import jakarta.validation.constraints.Size;
+
+import java.math.BigDecimal;
+import java.util.UUID;
+
+/**
+ * ================================================================
+ * ROMELT TECHCARE — WEBSITE MEDIA ASSET UPDATE REQUEST
+ * ================================================================
+ *
+ * Purpose:
+ * Carries validated administrator input for updating editable media
+ * metadata.
+ *
+ * Responsibilities:
+ * - Updates file metadata and descriptive information.
+ * - Updates accessibility information.
+ * - Updates dimensions and image focal points.
+ * - Updates public visibility when appropriate.
+ *
+ * Protected fields:
+ * The asset lifecycle status must be changed through dedicated service
+ * operations. Archive, deletion, administrator ownership, timestamps,
+ * and optimistic-lock values cannot be replaced through this request.
+ * ================================================================
+ */
+public record WebsiteMediaAssetUpdateRequest(
+
+        UUID fileAttachmentId,
+
+        @Size(
+                max = 180,
+                message = "Asset key must not exceed 180 characters."
+        )
+        String assetKey,
+
+        @NotBlank(
+                message = "Original file name is required."
+        )
+        @Size(
+                max = 255,
+                message = "Original file name must not exceed 255 characters."
+        )
+        String originalFileName,
+
+        @Size(
+                max = 1500,
+                message = "Public URL must not exceed 1500 characters."
+        )
+        String publicUrl,
+
+        @Size(
+                max = 1000,
+                message = "Storage key must not exceed 1000 characters."
+        )
+        String storageKey,
+
+        @NotBlank(
+                message = "MIME type is required."
+        )
+        @Size(
+                max = 150,
+                message = "MIME type must not exceed 150 characters."
+        )
+        String mimeType,
+
+        @Size(
+                max = 30,
+                message = "File extension must not exceed 30 characters."
+        )
+        String fileExtension,
+
+        @PositiveOrZero(
+                message = "File size must not be negative."
+        )
+        Long fileSizeBytes,
+
+        @Positive(
+                message = "Image width must be greater than zero."
+        )
+        Integer widthPixels,
+
+        @Positive(
+                message = "Image height must be greater than zero."
+        )
+        Integer heightPixels,
+
+        @Size(
+                max = 255,
+                message = "Title must not exceed 255 characters."
+        )
+        String title,
+
+        @Size(
+                max = 500,
+                message = "Alternative text must not exceed 500 characters."
+        )
+        String altText,
+
+        String caption,
+
+        String description,
+
+        Boolean isDecorative,
+
+        @DecimalMin(
+                value = "0.00",
+                message = "Horizontal focal point must not be less than zero."
+        )
+        @DecimalMax(
+                value = "100.00",
+                message = "Horizontal focal point must not exceed 100."
+        )
+        BigDecimal focalPointX,
+
+        @DecimalMin(
+                value = "0.00",
+                message = "Vertical focal point must not be less than zero."
+        )
+        @DecimalMax(
+                value = "100.00",
+                message = "Vertical focal point must not exceed 100."
+        )
+        BigDecimal focalPointY,
+
+        Boolean isPublic
+) {
+}

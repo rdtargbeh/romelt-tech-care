@@ -1,4 +1,4 @@
-package romelt_techcare.backend.service;
+package romelt_techcare.backend.service.implement;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,6 +23,7 @@ import romelt_techcare.backend.exception.PublicRequestRejectedException;
 import romelt_techcare.backend.mapper.BookingRequestMapper;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.BookingRequestRepository;
+import romelt_techcare.backend.service.BookingRequestService;
 
 import java.security.SecureRandom;
 import java.time.LocalDate;

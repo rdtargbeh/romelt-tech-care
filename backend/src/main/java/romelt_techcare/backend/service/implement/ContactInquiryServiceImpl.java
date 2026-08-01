@@ -1,4 +1,4 @@
-package romelt_techcare.backend.service;
+package romelt_techcare.backend.service.implement;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -9,6 +9,7 @@ import romelt_techcare.backend.dto.ContactInquiryCreateRequest;
 import romelt_techcare.backend.entity.ContactInquiry;
 import romelt_techcare.backend.mapper.ContactInquiryMapper;
 import romelt_techcare.backend.repository.ContactInquiryRepository;
+import romelt_techcare.backend.service.ContactInquiryService;
 
 import java.security.SecureRandom;
 import java.time.Year;

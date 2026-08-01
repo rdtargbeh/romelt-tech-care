@@ -1,6 +1,6 @@
 /**
  * ================================================================
- * ROMELT TECHCARE — BOOKING PAGE
+ * ROMELT TECHCARE — PUBLIC BOOKING PAGE
  * ================================================================
  *
  * Purpose:
@@ -8,8 +8,11 @@
  *
  * Responsibilities:
  * - Collects customer and service-request information.
+ * - Presents the booking form in compact, organized sections.
+ * - Displays a live booking summary while the customer completes it.
  * - Validates booking information before submission.
  * - Prevents requests for past dates.
+ * - Requires address information for on-site service.
  * - Submits booking requests to the Spring Boot backend when enabled.
  * - Uses a development confirmation when the booking API is disabled.
  * - Maps backend validation errors to matching form fields.
@@ -18,24 +21,11 @@
  * - Displays the backend reference number after submission.
  *
  * Real-data integration:
- * When VITE_ENABLE_BOOKING_API=true, this page submits to:
- *
  * POST /api/v1/public/booking-requests
  *
- * Expected backend response data:
- * {
- *   "bookingRequestId": "optional UUID",
- *   "referenceNumber": "RTB-2026-000001",
- *   "message": "Booking request submitted successfully.",
- *   "submittedAt": "2026-07-19T18:00:00Z",
- *   "requestedDate": "2026-07-25",
- *   "requestedTime": "EVENING",
- *   "status": "PENDING"
- * }
- *
  * Important:
- * A submitted request does not represent a confirmed appointment.
- * Romelt TechCare must review availability and contact the customer.
+ * A submitted request is not a confirmed appointment. Romelt
+ * TechCare must review availability and contact the customer.
  * ================================================================
  */
 
@@ -49,14 +39,19 @@ import {
 } from "react";
 import {
   CalendarCheck2,
+  Check,
   CheckCircle2,
   CircleAlert,
   Clock3,
+  Info,
   Laptop,
   Mail,
   MapPin,
   Phone,
+  Send,
   ShieldCheck,
+  UserRound,
+  Wrench,
 } from "lucide-react";
 import { Link } from "react-router";
 
@@ -149,25 +144,22 @@ const serviceMethodOptions = [
   {
     value: "REMOTE",
     label: "Remote support",
-    description: "Receive help through a secure remote-support session.",
+    description: "Get help through a secure remote-support session.",
   },
   {
     value: "ON_SITE",
     label: "On-site service",
-    description:
-      "Request service at your home, office, church, or organization.",
+    description: "Request support at your home, office, or organization.",
   },
   {
     value: "DROP_OFF",
     label: "Drop-off service",
-    description:
-      "Request instructions for leaving an eligible device for service.",
+    description: "Receive instructions for leaving an eligible device.",
   },
   {
     value: "NOT_SURE",
     label: "Not sure",
-    description:
-      "Romelt TechCare will recommend the most appropriate service method.",
+    description: "We will recommend the most appropriate service method.",
   },
 ] as const;
 
@@ -221,6 +213,8 @@ export function BookingPage() {
   const activeRequestControllerRef = useRef<AbortController | null>(null);
 
   const minimumBookingDate = getMinimumBookingDate();
+
+  const requiresServiceAddress = form.serviceMethod === "ON_SITE";
 
   useEffect(() => {
     return () => {
@@ -363,576 +357,618 @@ export function BookingPage() {
     scrollToPageTop();
   };
 
-  const requiresServiceAddress = form.serviceMethod === "ON_SITE";
-
   return (
     <>
-      <section className="border-b border-slate-200 bg-white">
+      <BookingHero />
+
+      <section className="bg-slate-50 py-8 sm:py-10 lg:py-12">
         <Container>
-          <div className="max-w-4xl py-16 sm:py-20">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-brand-50 text-brand-700">
-              <CalendarCheck2 className="h-7 w-7" aria-hidden="true" />
-            </div>
+          <div className="mx-auto grid max-w-7xl items-start gap-5 lg:grid-cols-[270px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)]">
+            <aside className="order-2 space-y-4 lg:order-1 lg:sticky lg:top-24">
+              <BookingSummaryCard form={form} />
 
-            <p className="mt-6 text-sm font-extrabold uppercase tracking-[0.18em] text-brand-700">
-              Request Service
-            </p>
-
-            <h1 className="mt-4 font-display text-4xl font-black tracking-tight text-navy-950 sm:text-5xl">
-              Book technology support
-            </h1>
-
-            <p className="mt-6 max-w-3xl text-lg leading-8 text-slate-600">
-              Tell us what assistance you need and when you would prefer
-              service. Submitting this form creates a booking request, not a
-              confirmed appointment.
-            </p>
-          </div>
-        </Container>
-      </section>
-
-      <section className="bg-slate-50 py-16">
-        <Container>
-          <div className="mx-auto grid max-w-7xl gap-8 lg:grid-cols-[0.34fr_1fr]">
-            <aside className="space-y-6">
-              <BookingInformationCard />
               <AvailabilityCard />
-              <SensitiveInformationCard />
-              <ContactCard />
+
+              <SafetyAndContactCard />
             </aside>
 
-            {confirmation ? (
-              <BookingConfirmation
-                fullName={form.fullName}
-                email={form.email}
-                serviceType={form.serviceType}
-                serviceMethod={form.serviceMethod}
-                confirmation={confirmation}
-                isDevelopmentFallback={!environmentConfig.enableBookingApi}
-                onReset={resetForm}
-              />
-            ) : (
-              <form
-                onSubmit={handleSubmit}
-                noValidate
-                className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8"
-              >
-                <div>
-                  <p className="text-sm font-extrabold uppercase tracking-[0.16em] text-brand-700">
-                    Booking Request
-                  </p>
-
-                  <h2 className="mt-3 font-display text-2xl font-black text-navy-950 sm:text-3xl">
-                    Tell us how we can help
-                  </h2>
-
-                  <p className="mt-3 leading-7 text-slate-600">
-                    Fields marked with an asterisk are required.
-                  </p>
-                </div>
-
-                {submissionError ? (
-                  <SubmissionErrorAlert error={submissionError} />
-                ) : Object.keys(errors).length > 0 ? (
-                  <ValidationAlert />
-                ) : null}
-
-                <FormSection
-                  title="Customer information"
-                  description="Provide the best information for contacting you about this request."
+            <main className="order-1 min-w-0 lg:order-2">
+              {confirmation ? (
+                <BookingConfirmation
+                  fullName={form.fullName}
+                  email={form.email}
+                  serviceType={form.serviceType}
+                  serviceMethod={form.serviceMethod}
+                  confirmation={confirmation}
+                  isDevelopmentFallback={!environmentConfig.enableBookingApi}
+                  onReset={resetForm}
+                />
+              ) : (
+                <form
+                  onSubmit={handleSubmit}
+                  noValidate
+                  className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
                 >
-                  <div className="grid gap-6 md:grid-cols-2">
-                    <FormField
-                      label="Full name"
-                      name="fullName"
-                      error={errors.fullName}
-                      required
-                    >
-                      <input
-                        id="fullName"
-                        name="fullName"
-                        type="text"
-                        autoComplete="name"
-                        maxLength={120}
-                        value={form.fullName}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.fullName)}
-                        aria-describedby={
-                          errors.fullName ? "fullName-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.fullName))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Email address"
-                      name="email"
-                      error={errors.email}
-                      required
-                    >
-                      <input
-                        id="email"
-                        name="email"
-                        type="email"
-                        autoComplete="email"
-                        maxLength={254}
-                        value={form.email}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.email)}
-                        aria-describedby={
-                          errors.email ? "email-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.email))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Phone number"
-                      name="phone"
-                      error={errors.phone}
-                      required
-                    >
-                      <input
-                        id="phone"
-                        name="phone"
-                        type="tel"
-                        inputMode="tel"
-                        autoComplete="tel"
-                        maxLength={30}
-                        placeholder="(515) 555-1234"
-                        value={form.phone}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.phone)}
-                        aria-describedby={
-                          errors.phone ? "phone-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.phone))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Preferred contact method"
-                      name="preferredContactMethod"
-                      error={errors.preferredContactMethod}
-                      required
-                    >
-                      <select
-                        id="preferredContactMethod"
-                        name="preferredContactMethod"
-                        value={form.preferredContactMethod}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.preferredContactMethod)}
-                        aria-describedby={
-                          errors.preferredContactMethod
-                            ? "preferredContactMethod-error"
-                            : undefined
-                        }
-                        className={getInputClass(
-                          Boolean(errors.preferredContactMethod),
-                        )}
-                      >
-                        <option value="">Select contact method</option>
-
-                        {preferredContactOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </FormField>
-                  </div>
-                </FormSection>
-
-                <FormSection
-                  title="Service information"
-                  description="Select the service and delivery method that best match your request."
-                >
-                  <div className="grid gap-6 md:grid-cols-2">
-                    <FormField
-                      label="Service needed"
-                      name="serviceType"
-                      error={errors.serviceType}
-                      required
-                    >
-                      <select
-                        id="serviceType"
-                        name="serviceType"
-                        value={form.serviceType}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.serviceType)}
-                        aria-describedby={
-                          errors.serviceType ? "serviceType-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.serviceType))}
-                      >
-                        <option value="">Select a service</option>
-
-                        {serviceTypeOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </FormField>
-
-                    <FormField
-                      label="Device or equipment type"
-                      name="deviceType"
-                      error={errors.deviceType}
-                      hint="Optional"
-                    >
-                      <input
-                        id="deviceType"
-                        name="deviceType"
-                        type="text"
-                        maxLength={120}
-                        placeholder="Laptop, desktop, printer, router..."
-                        value={form.deviceType}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.deviceType)}
-                        aria-describedby={
-                          errors.deviceType ? "deviceType-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.deviceType))}
-                      />
-                    </FormField>
-                  </div>
-
-                  <fieldset className="mt-6">
-                    <legend className="text-sm font-bold text-slate-800">
-                      Preferred service method
-                      <span aria-hidden="true" className="ml-1 text-red-600">
-                        *
-                      </span>
-                    </legend>
-
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      {serviceMethodOptions.map((option) => {
-                        const isSelected = form.serviceMethod === option.value;
-
-                        return (
-                          <label
-                            key={option.value}
-                            className={[
-                              "cursor-pointer rounded-2xl border p-4 transition",
-                              isSelected
-                                ? "border-brand-600 bg-brand-50"
-                                : "border-slate-200 bg-white hover:border-brand-300",
-                            ].join(" ")}
-                          >
-                            <span className="flex items-start gap-3">
-                              <input
-                                name="serviceMethod"
-                                type="radio"
-                                value={option.value}
-                                checked={isSelected}
-                                onChange={handleTextChange}
-                                aria-invalid={Boolean(errors.serviceMethod)}
-                                className="focus-ring mt-1 h-4 w-4"
-                              />
-
-                              <span>
-                                <span className="block font-bold text-navy-950">
-                                  {option.label}
-                                </span>
-
-                                <span className="mt-1 block text-sm leading-6 text-slate-600">
-                                  {option.description}
-                                </span>
-                              </span>
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-
-                    {errors.serviceMethod ? (
-                      <p
-                        id="serviceMethod-error"
-                        className="mt-2 text-sm font-semibold text-red-700"
-                      >
-                        {errors.serviceMethod}
-                      </p>
-                    ) : null}
-                  </fieldset>
-
-                  <div className="mt-6">
-                    <FormField
-                      label="Describe the problem or requested service"
-                      name="problemDescription"
-                      error={errors.problemDescription}
-                      required
-                    >
-                      <textarea
-                        id="problemDescription"
-                        name="problemDescription"
-                        rows={7}
-                        maxLength={2_000}
-                        placeholder="Describe the device, symptoms, error messages, when the problem began, and anything already attempted."
-                        value={form.problemDescription}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.problemDescription)}
-                        aria-describedby={
-                          errors.problemDescription
-                            ? "problemDescription-error"
-                            : "problemDescription-help"
-                        }
-                        className={getInputClass(
-                          Boolean(errors.problemDescription),
-                        )}
-                      />
-
-                      <div
-                        id="problemDescription-help"
-                        className="mt-2 flex justify-between gap-4 text-xs text-slate-500"
-                      >
-                        <span>Minimum 20 characters</span>
-
-                        <span>
-                          {form.problemDescription.length}
-                          /2,000
-                        </span>
-                      </div>
-                    </FormField>
-                  </div>
-                </FormSection>
-
-                <FormSection
-                  title="Requested schedule"
-                  description="Provide your preferred date and time. Availability will be confirmed separately."
-                >
-                  <div className="grid gap-6 md:grid-cols-2">
-                    <FormField
-                      label="Preferred date"
-                      name="preferredDate"
-                      error={errors.preferredDate}
-                      required
-                    >
-                      <input
-                        id="preferredDate"
-                        name="preferredDate"
-                        type="date"
-                        min={minimumBookingDate}
-                        value={form.preferredDate}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.preferredDate)}
-                        aria-describedby={
-                          errors.preferredDate
-                            ? "preferredDate-error"
-                            : undefined
-                        }
-                        className={getInputClass(Boolean(errors.preferredDate))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Preferred time"
-                      name="preferredTime"
-                      error={errors.preferredTime}
-                      required
-                    >
-                      <select
-                        id="preferredTime"
-                        name="preferredTime"
-                        value={form.preferredTime}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.preferredTime)}
-                        aria-describedby={
-                          errors.preferredTime
-                            ? "preferredTime-error"
-                            : undefined
-                        }
-                        className={getInputClass(Boolean(errors.preferredTime))}
-                      >
-                        <option value="">Select a time</option>
-
-                        {preferredTimeOptions.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </FormField>
-
-                    <FormField
-                      label="Alternate date"
-                      name="alternateDate"
-                      error={errors.alternateDate}
-                      hint="Optional"
-                    >
-                      <input
-                        id="alternateDate"
-                        name="alternateDate"
-                        type="date"
-                        min={minimumBookingDate}
-                        value={form.alternateDate}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.alternateDate)}
-                        aria-describedby={
-                          errors.alternateDate
-                            ? "alternateDate-error"
-                            : undefined
-                        }
-                        className={getInputClass(Boolean(errors.alternateDate))}
-                      />
-                    </FormField>
-                  </div>
-                </FormSection>
-
-                <FormSection
-                  title="Service location"
-                  description={
-                    requiresServiceAddress
-                      ? "An address is required for an on-site service request."
-                      : "Location information is optional unless you selected on-site service."
-                  }
-                >
-                  <div className="grid gap-6 md:grid-cols-2">
-                    <div className="md:col-span-2">
-                      <FormField
-                        label="Street address"
-                        name="streetAddress"
-                        error={errors.streetAddress}
-                        required={requiresServiceAddress}
-                      >
-                        <input
-                          id="streetAddress"
-                          name="streetAddress"
-                          type="text"
-                          autoComplete="street-address"
-                          maxLength={180}
-                          value={form.streetAddress}
-                          onChange={handleTextChange}
-                          aria-invalid={Boolean(errors.streetAddress)}
-                          aria-describedby={
-                            errors.streetAddress
-                              ? "streetAddress-error"
-                              : undefined
-                          }
-                          className={getInputClass(
-                            Boolean(errors.streetAddress),
-                          )}
-                        />
-                      </FormField>
-                    </div>
-
-                    <FormField
-                      label="City"
-                      name="city"
-                      error={errors.city}
-                      required={requiresServiceAddress}
-                    >
-                      <input
-                        id="city"
-                        name="city"
-                        type="text"
-                        autoComplete="address-level2"
-                        maxLength={100}
-                        value={form.city}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.city)}
-                        aria-describedby={
-                          errors.city ? "city-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.city))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="State"
-                      name="state"
-                      error={errors.state}
-                      required={requiresServiceAddress}
-                    >
-                      <input
-                        id="state"
-                        name="state"
-                        type="text"
-                        autoComplete="address-level1"
-                        maxLength={100}
-                        value={form.state}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.state)}
-                        aria-describedby={
-                          errors.state ? "state-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.state))}
-                      />
-                    </FormField>
-
-                    <FormField
-                      label="Postal code"
-                      name="postalCode"
-                      error={errors.postalCode}
-                      required={requiresServiceAddress}
-                    >
-                      <input
-                        id="postalCode"
-                        name="postalCode"
-                        type="text"
-                        inputMode="numeric"
-                        autoComplete="postal-code"
-                        maxLength={10}
-                        value={form.postalCode}
-                        onChange={handleTextChange}
-                        aria-invalid={Boolean(errors.postalCode)}
-                        aria-describedby={
-                          errors.postalCode ? "postalCode-error" : undefined
-                        }
-                        className={getInputClass(Boolean(errors.postalCode))}
-                      />
-                    </FormField>
-                  </div>
-                </FormSection>
-
-                <div className="mt-10 border-t border-slate-200 pt-8">
-                  <label className="flex cursor-pointer items-start gap-3">
-                    <input
-                      name="consentAccepted"
-                      type="checkbox"
-                      checked={form.consentAccepted}
-                      onChange={(event) =>
-                        updateField("consentAccepted", event.target.checked)
-                      }
-                      aria-invalid={Boolean(errors.consentAccepted)}
-                      aria-describedby={
-                        errors.consentAccepted
-                          ? "consentAccepted-error"
-                          : undefined
-                      }
-                      className="focus-ring mt-1 h-5 w-5 shrink-0 rounded border-slate-300 text-brand-700"
-                    />
-
-                    <span className="text-sm leading-7 text-slate-600">
-                      I confirm that the submitted information is accurate. I
-                      understand that this is a request only and that the
-                      appointment is not confirmed until Romelt TechCare
-                      contacts me.
-                    </span>
-                  </label>
-
-                  {errors.consentAccepted ? (
-                    <p
-                      id="consentAccepted-error"
-                      className="mt-2 text-sm font-semibold text-red-700"
-                    >
-                      {errors.consentAccepted}
+                  <div className="border-b border-slate-200 px-5 py-5 sm:px-6">
+                    <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-700">
+                      Booking Request
                     </p>
+
+                    <h2 className="mt-1 font-display text-2xl font-black text-navy-950">
+                      Tell us how we can help
+                    </h2>
+
+                    <p className="mt-1 text-sm leading-6 text-slate-600">
+                      Complete the sections below. Fields marked with an
+                      asterisk are required.
+                    </p>
+                  </div>
+
+                  {submissionError ? (
+                    <div className="px-5 pt-5 sm:px-6">
+                      <SubmissionErrorAlert error={submissionError} />
+                    </div>
+                  ) : Object.keys(errors).length > 0 ? (
+                    <div className="px-5 pt-5 sm:px-6">
+                      <ValidationAlert />
+                    </div>
                   ) : null}
 
-                  <button
-                    type="submit"
-                    disabled={isSubmitting}
-                    aria-busy={isSubmitting}
-                    className="focus-ring mt-8 inline-flex min-h-12 w-full items-center justify-center rounded-xl bg-brand-700 px-6 py-3 font-bold text-white transition hover:bg-brand-800 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-                  >
-                    {isSubmitting
-                      ? "Submitting Request..."
-                      : "Submit Booking Request"}
-                  </button>
-                </div>
-              </form>
-            )}
+                  <div className="space-y-4 p-4 sm:p-5 lg:p-6">
+                    <FormSection
+                      number={1}
+                      title="Customer information"
+                      description="Provide the best information for contacting you about this request."
+                      icon={<UserRound />}
+                    >
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <FormField
+                          label="Full name"
+                          name="fullName"
+                          error={errors.fullName}
+                          required
+                        >
+                          <input
+                            id="fullName"
+                            name="fullName"
+                            type="text"
+                            autoComplete="name"
+                            maxLength={120}
+                            placeholder="Your full name"
+                            value={form.fullName}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.fullName)}
+                            aria-describedby={
+                              errors.fullName ? "fullName-error" : undefined
+                            }
+                            className={getInputClass(Boolean(errors.fullName))}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Email address"
+                          name="email"
+                          error={errors.email}
+                          required
+                        >
+                          <input
+                            id="email"
+                            name="email"
+                            type="email"
+                            autoComplete="email"
+                            maxLength={254}
+                            placeholder="you@email.com"
+                            value={form.email}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.email)}
+                            aria-describedby={
+                              errors.email ? "email-error" : undefined
+                            }
+                            className={getInputClass(Boolean(errors.email))}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Phone number"
+                          name="phone"
+                          error={errors.phone}
+                          required
+                        >
+                          <input
+                            id="phone"
+                            name="phone"
+                            type="tel"
+                            inputMode="tel"
+                            autoComplete="tel"
+                            maxLength={30}
+                            placeholder="(515) 555-1234"
+                            value={form.phone}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.phone)}
+                            aria-describedby={
+                              errors.phone ? "phone-error" : undefined
+                            }
+                            className={getInputClass(Boolean(errors.phone))}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Preferred contact method"
+                          name="preferredContactMethod"
+                          error={errors.preferredContactMethod}
+                          required
+                        >
+                          <select
+                            id="preferredContactMethod"
+                            name="preferredContactMethod"
+                            value={form.preferredContactMethod}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(
+                              errors.preferredContactMethod,
+                            )}
+                            aria-describedby={
+                              errors.preferredContactMethod
+                                ? "preferredContactMethod-error"
+                                : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.preferredContactMethod),
+                            )}
+                          >
+                            <option value="">Select contact method</option>
+
+                            {preferredContactOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </FormField>
+                      </div>
+                    </FormSection>
+
+                    <FormSection
+                      number={2}
+                      title="Service information"
+                      description="Select the service and support method that best match your request."
+                      icon={<Wrench />}
+                    >
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <FormField
+                          label="Service needed"
+                          name="serviceType"
+                          error={errors.serviceType}
+                          required
+                        >
+                          <select
+                            id="serviceType"
+                            name="serviceType"
+                            value={form.serviceType}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.serviceType)}
+                            aria-describedby={
+                              errors.serviceType
+                                ? "serviceType-error"
+                                : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.serviceType),
+                            )}
+                          >
+                            <option value="">Select a service</option>
+
+                            {serviceTypeOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </FormField>
+
+                        <FormField
+                          label="Device or equipment"
+                          name="deviceType"
+                          error={errors.deviceType}
+                          hint="Optional"
+                        >
+                          <input
+                            id="deviceType"
+                            name="deviceType"
+                            type="text"
+                            maxLength={120}
+                            placeholder="Laptop, printer, router..."
+                            value={form.deviceType}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.deviceType)}
+                            aria-describedby={
+                              errors.deviceType ? "deviceType-error" : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.deviceType),
+                            )}
+                          />
+                        </FormField>
+                      </div>
+
+                      <fieldset className="mt-4">
+                        <legend className="text-xs font-extrabold text-slate-800">
+                          Preferred service method
+                          <span
+                            aria-hidden="true"
+                            className="ml-1 text-red-600"
+                          >
+                            *
+                          </span>
+                        </legend>
+
+                        <div className="mt-2 grid gap-3 md:grid-cols-2">
+                          {serviceMethodOptions.map((option) => {
+                            const isSelected =
+                              form.serviceMethod === option.value;
+
+                            return (
+                              <label
+                                key={option.value}
+                                className={[
+                                  "cursor-pointer rounded-xl border px-4 py-3 transition",
+                                  isSelected
+                                    ? "border-brand-600 bg-brand-50 shadow-sm"
+                                    : "border-slate-200 bg-white hover:border-brand-300 hover:bg-slate-50",
+                                ].join(" ")}
+                              >
+                                <span className="flex items-start gap-3">
+                                  <input
+                                    name="serviceMethod"
+                                    type="radio"
+                                    value={option.value}
+                                    checked={isSelected}
+                                    onChange={handleTextChange}
+                                    aria-invalid={Boolean(errors.serviceMethod)}
+                                    className="focus-ring mt-1 h-4 w-4 shrink-0"
+                                  />
+
+                                  <span>
+                                    <span className="block text-sm font-extrabold text-navy-950">
+                                      {option.label}
+                                    </span>
+
+                                    <span className="mt-0.5 block text-xs leading-5 text-slate-600">
+                                      {option.description}
+                                    </span>
+                                  </span>
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+
+                        {errors.serviceMethod ? (
+                          <p
+                            id="serviceMethod-error"
+                            className="mt-2 text-sm font-semibold text-red-700"
+                          >
+                            {errors.serviceMethod}
+                          </p>
+                        ) : null}
+                      </fieldset>
+
+                      <div className="mt-4">
+                        <FormField
+                          label="Describe the problem or requested service"
+                          name="problemDescription"
+                          error={errors.problemDescription}
+                          required
+                        >
+                          <textarea
+                            id="problemDescription"
+                            name="problemDescription"
+                            rows={5}
+                            maxLength={2_000}
+                            placeholder="Describe the symptoms, error messages, when the problem began, and anything already attempted."
+                            value={form.problemDescription}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.problemDescription)}
+                            aria-describedby={
+                              errors.problemDescription
+                                ? "problemDescription-error"
+                                : "problemDescription-help"
+                            }
+                            className={`${getInputClass(
+                              Boolean(errors.problemDescription),
+                            )} resize-y`}
+                          />
+
+                          <div
+                            id="problemDescription-help"
+                            className="mt-1.5 flex justify-between gap-4 text-[11px] text-slate-500"
+                          >
+                            <span>Minimum 20 characters</span>
+
+                            <span>
+                              {form.problemDescription.length}
+                              /2,000
+                            </span>
+                          </div>
+                        </FormField>
+                      </div>
+                    </FormSection>
+
+                    <FormSection
+                      number={3}
+                      title="Requested schedule"
+                      description="Choose your preferred date and time. Availability will be confirmed separately."
+                      icon={<Clock3 />}
+                    >
+                      <div className="grid gap-4 md:grid-cols-3">
+                        <FormField
+                          label="Preferred date"
+                          name="preferredDate"
+                          error={errors.preferredDate}
+                          required
+                        >
+                          <input
+                            id="preferredDate"
+                            name="preferredDate"
+                            type="date"
+                            min={minimumBookingDate}
+                            value={form.preferredDate}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.preferredDate)}
+                            aria-describedby={
+                              errors.preferredDate
+                                ? "preferredDate-error"
+                                : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.preferredDate),
+                            )}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Preferred time"
+                          name="preferredTime"
+                          error={errors.preferredTime}
+                          required
+                        >
+                          <select
+                            id="preferredTime"
+                            name="preferredTime"
+                            value={form.preferredTime}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.preferredTime)}
+                            aria-describedby={
+                              errors.preferredTime
+                                ? "preferredTime-error"
+                                : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.preferredTime),
+                            )}
+                          >
+                            <option value="">Select a time</option>
+
+                            {preferredTimeOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </FormField>
+
+                        <FormField
+                          label="Alternate date"
+                          name="alternateDate"
+                          error={errors.alternateDate}
+                          hint="Optional"
+                        >
+                          <input
+                            id="alternateDate"
+                            name="alternateDate"
+                            type="date"
+                            min={minimumBookingDate}
+                            value={form.alternateDate}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.alternateDate)}
+                            aria-describedby={
+                              errors.alternateDate
+                                ? "alternateDate-error"
+                                : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.alternateDate),
+                            )}
+                          />
+                        </FormField>
+                      </div>
+                    </FormSection>
+
+                    <FormSection
+                      number={4}
+                      title="Service location"
+                      description={
+                        requiresServiceAddress
+                          ? "Enter the complete address where on-site service is requested."
+                          : "Address information is optional unless you selected on-site service."
+                      }
+                      icon={<MapPin />}
+                    >
+                      {requiresServiceAddress ? (
+                        <div className="mb-4 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+                          <Info className="mt-0.5 h-4 w-4 shrink-0" />
+
+                          <p>
+                            Street address, city, state, and postal code are
+                            required for on-site service.
+                          </p>
+                        </div>
+                      ) : null}
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="md:col-span-2">
+                          <FormField
+                            label="Street address"
+                            name="streetAddress"
+                            error={errors.streetAddress}
+                            required={requiresServiceAddress}
+                          >
+                            <input
+                              id="streetAddress"
+                              name="streetAddress"
+                              type="text"
+                              autoComplete="street-address"
+                              maxLength={180}
+                              placeholder="Street address"
+                              value={form.streetAddress}
+                              onChange={handleTextChange}
+                              aria-invalid={Boolean(errors.streetAddress)}
+                              aria-describedby={
+                                errors.streetAddress
+                                  ? "streetAddress-error"
+                                  : undefined
+                              }
+                              className={getInputClass(
+                                Boolean(errors.streetAddress),
+                              )}
+                            />
+                          </FormField>
+                        </div>
+
+                        <FormField
+                          label="City"
+                          name="city"
+                          error={errors.city}
+                          required={requiresServiceAddress}
+                        >
+                          <input
+                            id="city"
+                            name="city"
+                            type="text"
+                            autoComplete="address-level2"
+                            maxLength={100}
+                            placeholder="City"
+                            value={form.city}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.city)}
+                            aria-describedby={
+                              errors.city ? "city-error" : undefined
+                            }
+                            className={getInputClass(Boolean(errors.city))}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="State"
+                          name="state"
+                          error={errors.state}
+                          required={requiresServiceAddress}
+                        >
+                          <input
+                            id="state"
+                            name="state"
+                            type="text"
+                            autoComplete="address-level1"
+                            maxLength={100}
+                            value={form.state}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.state)}
+                            aria-describedby={
+                              errors.state ? "state-error" : undefined
+                            }
+                            className={getInputClass(Boolean(errors.state))}
+                          />
+                        </FormField>
+
+                        <FormField
+                          label="Postal code"
+                          name="postalCode"
+                          error={errors.postalCode}
+                          required={requiresServiceAddress}
+                        >
+                          <input
+                            id="postalCode"
+                            name="postalCode"
+                            type="text"
+                            inputMode="numeric"
+                            autoComplete="postal-code"
+                            maxLength={10}
+                            placeholder="50309"
+                            value={form.postalCode}
+                            onChange={handleTextChange}
+                            aria-invalid={Boolean(errors.postalCode)}
+                            aria-describedby={
+                              errors.postalCode ? "postalCode-error" : undefined
+                            }
+                            className={getInputClass(
+                              Boolean(errors.postalCode),
+                            )}
+                          />
+                        </FormField>
+                      </div>
+                    </FormSection>
+
+                    <section className="rounded-xl border border-slate-200 bg-slate-50 p-4 sm:p-5">
+                      <label className="flex cursor-pointer items-start gap-3">
+                        <input
+                          name="consentAccepted"
+                          type="checkbox"
+                          checked={form.consentAccepted}
+                          onChange={(event) =>
+                            updateField("consentAccepted", event.target.checked)
+                          }
+                          aria-invalid={Boolean(errors.consentAccepted)}
+                          aria-describedby={
+                            errors.consentAccepted
+                              ? "consentAccepted-error"
+                              : undefined
+                          }
+                          className="focus-ring mt-0.5 h-5 w-5 shrink-0 rounded border-slate-300 text-brand-700"
+                        />
+
+                        <span className="text-sm leading-6 text-slate-700">
+                          I confirm that the information is accurate. I
+                          understand this is a service request and the
+                          appointment is not confirmed until Romelt TechCare
+                          contacts me.
+                        </span>
+                      </label>
+
+                      {errors.consentAccepted ? (
+                        <p
+                          id="consentAccepted-error"
+                          className="mt-2 pl-8 text-sm font-semibold text-red-700"
+                        >
+                          {errors.consentAccepted}
+                        </p>
+                      ) : null}
+                    </section>
+                  </div>
+
+                  <div className="flex flex-col gap-3 border-t border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                    <div className="flex items-center gap-2 text-xs text-slate-500">
+                      <ShieldCheck className="h-4 w-4 text-brand-700" />
+
+                      <span>
+                        Never submit passwords or financial account information.
+                      </span>
+                    </div>
+
+                    <button
+                      type="submit"
+                      disabled={isSubmitting}
+                      aria-busy={isSubmitting}
+                      className="focus-ring inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-brand-700 px-6 py-2.5 text-sm font-extrabold text-white transition hover:bg-brand-800 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      <Send className="h-4 w-4" />
+
+                      {isSubmitting
+                        ? "Submitting Request..."
+                        : "Submit Booking Request"}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </main>
           </div>
         </Container>
       </section>
@@ -940,124 +976,249 @@ export function BookingPage() {
   );
 }
 
-function BookingInformationCard() {
+function BookingHero() {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <Laptop className="h-7 w-7 text-brand-700" aria-hidden="true" />
+    <section className="border-b border-slate-200 bg-white">
+      <Container>
+        <div className="flex max-w-4xl items-start gap-4 py-9 sm:py-11 lg:py-12">
+          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-brand-50 text-brand-700">
+            <CalendarCheck2 className="h-5 w-5" aria-hidden="true" />
+          </div>
 
-      <h2 className="mt-4 font-display text-xl font-extrabold text-navy-950">
-        Before submitting
-      </h2>
+          <div>
+            <p className="text-xs font-extrabold uppercase tracking-[0.16em] text-brand-700">
+              Request Service
+            </p>
 
-      <ul className="mt-4 space-y-3 text-sm leading-7 text-slate-600">
-        <li>Describe the problem and affected device clearly.</li>
+            <h1 className="mt-1.5 font-display text-3xl font-black tracking-tight text-navy-950 sm:text-4xl">
+              Book technology support
+            </h1>
 
-        <li>Include visible error messages when possible.</li>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600 sm:text-base">
+              Tell us what assistance you need and when you would prefer
+              service. Submitting this form creates a booking request, not a
+              confirmed appointment.
+            </p>
+          </div>
+        </div>
+      </Container>
+    </section>
+  );
+}
 
-        <li>Do not submit passwords or financial information.</li>
+function BookingSummaryCard({ form }: { form: BookingFormState }) {
+  const serviceLabel =
+    serviceTypeOptions.find((option) => option.value === form.serviceType)
+      ?.label ?? form.serviceType;
 
-        <li>Appointment availability is confirmed separately.</li>
-      </ul>
+  const methodLabel =
+    serviceMethodOptions.find((option) => option.value === form.serviceMethod)
+      ?.label ?? form.serviceMethod;
+
+  const hasCustomer = Boolean(form.fullName.trim());
+
+  const hasService = Boolean(form.serviceType);
+
+  const hasSchedule = Boolean(form.preferredDate);
+
+  const address = [form.streetAddress, form.city, form.state, form.postalCode]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join(", ");
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-center gap-3">
+        <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-50 text-brand-700">
+          <CalendarCheck2 className="h-4 w-4" />
+        </div>
+
+        <div>
+          <h2 className="font-display text-base font-extrabold text-navy-950">
+            Booking summary
+          </h2>
+
+          <p className="text-xs text-slate-500">
+            Updates as you complete the form
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 space-y-3">
+        <SummaryItem
+          icon={<UserRound />}
+          label="Customer"
+          value={hasCustomer ? form.fullName.trim() : "Not added"}
+          complete={hasCustomer}
+        />
+
+        <SummaryItem
+          icon={<Wrench />}
+          label="Service"
+          value={hasService ? serviceLabel : "Not selected"}
+          secondaryValue={methodLabel || undefined}
+          complete={hasService}
+        />
+
+        <SummaryItem
+          icon={<Clock3 />}
+          label="Schedule"
+          value={hasSchedule ? formatDate(form.preferredDate) : "Not selected"}
+          secondaryValue={
+            form.preferredTime ? formatEnumLabel(form.preferredTime) : undefined
+          }
+          complete={hasSchedule}
+        />
+
+        <SummaryItem
+          icon={<MapPin />}
+          label="Location"
+          value={
+            address ||
+            (form.serviceMethod === "ON_SITE"
+              ? "Address required"
+              : "Not required")
+          }
+          complete={form.serviceMethod !== "ON_SITE" || Boolean(address)}
+        />
+      </div>
+    </section>
+  );
+}
+
+function SummaryItem({
+  icon,
+  label,
+  value,
+  secondaryValue,
+  complete,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  secondaryValue?: string;
+  complete: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-3 rounded-xl bg-slate-50 px-3 py-2.5">
+      <div
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg [&>svg]:h-4 [&>svg]:w-4 ${
+          complete
+            ? "bg-emerald-100 text-emerald-700"
+            : "bg-slate-200 text-slate-500"
+        }`}
+      >
+        {complete ? <Check /> : icon}
+      </div>
+
+      <div className="min-w-0">
+        <p className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+          {label}
+        </p>
+
+        <p className="truncate text-sm font-bold text-slate-800">{value}</p>
+
+        {secondaryValue ? (
+          <p className="truncate text-xs text-slate-500">{secondaryValue}</p>
+        ) : null}
+      </div>
     </div>
   );
 }
 
 function AvailabilityCard() {
   return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <Clock3 className="h-7 w-7 text-brand-700" aria-hidden="true" />
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex items-center gap-3">
+        <Clock3 className="h-5 w-5 text-brand-700" aria-hidden="true" />
 
-      <h2 className="mt-4 font-display text-xl font-extrabold text-navy-950">
-        Service availability
-      </h2>
+        <h2 className="font-display text-base font-extrabold text-navy-950">
+          Service availability
+        </h2>
+      </div>
 
-      <div className="mt-4 space-y-3">
+      <div className="mt-3 divide-y divide-slate-100">
         {businessConfig.businessHours.map((schedule) => (
           <div
             key={schedule.day}
-            className="border-b border-slate-100 pb-3 last:border-b-0 last:pb-0"
+            className="flex items-start justify-between gap-4 py-2.5 first:pt-0 last:pb-0"
           >
-            <p className="font-bold text-slate-800">{schedule.day}</p>
+            <p className="text-sm font-bold text-slate-800">{schedule.day}</p>
 
-            <p className="mt-1 text-sm text-slate-600">{schedule.hours}</p>
+            <p className="text-right text-xs leading-5 text-slate-600">
+              {schedule.hours}
+            </p>
           </div>
         ))}
       </div>
 
-      <p className="mt-5 rounded-xl bg-brand-50 p-4 text-sm font-semibold leading-6 text-brand-900">
-        Requested dates remain pending until confirmed by Romelt TechCare.
+      <p className="mt-3 rounded-lg bg-brand-50 px-3 py-2.5 text-xs font-semibold leading-5 text-brand-900">
+        Requested dates remain pending until confirmed.
       </p>
-    </div>
+    </section>
   );
 }
 
-function SensitiveInformationCard() {
-  return (
-    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-      <ShieldCheck className="h-7 w-7 text-brand-700" aria-hidden="true" />
-
-      <h2 className="mt-4 font-display text-xl font-extrabold text-navy-950">
-        Protect your information
-      </h2>
-
-      <p className="mt-3 text-sm leading-7 text-slate-600">
-        Never include passwords, payment-card details, banking information,
-        Social Security numbers, or account recovery codes.
-      </p>
-    </div>
-  );
-}
-
-function ContactCard() {
+function SafetyAndContactCard() {
   const hasPhone =
     Boolean(businessPhoneHref) && Boolean(businessConfig.phoneDisplay);
 
   const hasEmail = Boolean(businessEmailHref) && Boolean(businessConfig.email);
 
   return (
-    <div className="rounded-2xl bg-navy-950 p-6 text-white shadow-sm">
-      <h2 className="font-display text-xl font-extrabold">
-        Need help before booking?
-      </h2>
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="p-4">
+        <div className="flex items-center gap-3">
+          <ShieldCheck className="h-5 w-5 text-brand-700" aria-hidden="true" />
 
-      <div className="mt-5 space-y-4">
-        {hasPhone && (
-          <a
-            href={businessPhoneHref ?? undefined}
-            className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
-          >
-            <Phone className="h-5 w-5 shrink-0" aria-hidden="true" />
+          <h2 className="font-display text-base font-extrabold text-navy-950">
+            Protect your information
+          </h2>
+        </div>
 
-            <span>{businessConfig.phoneDisplay}</span>
-          </a>
-        )}
-
-        {hasEmail && (
-          <a
-            href={businessEmailHref ?? undefined}
-            className="focus-ring flex items-center gap-3 rounded-lg text-slate-200 transition hover:text-white"
-          >
-            <Mail className="h-5 w-5 shrink-0" aria-hidden="true" />
-
-            <span className="break-all">{businessConfig.email}</span>
-          </a>
-        )}
-
-        {!hasPhone && !hasEmail && (
-          <p className="text-sm leading-6 text-slate-300">
-            Submit the contact form and the Romelt TechCare team will respond as
-            soon as possible.
-          </p>
-        )}
+        <p className="mt-2 text-xs leading-5 text-slate-600">
+          Never include passwords, payment-card details, banking information,
+          Social Security numbers, or account recovery codes.
+        </p>
       </div>
 
-      <Link
-        to="/contact"
-        className="focus-ring mt-6 inline-flex min-h-11 items-center justify-center rounded-xl bg-white px-5 py-3 font-bold text-navy-950 transition hover:bg-brand-50"
-      >
-        Send a General Message
-      </Link>
-    </div>
+      <div className="bg-navy-950 p-4 text-white">
+        <h3 className="font-display text-base font-extrabold">
+          Need help first?
+        </h3>
+
+        <div className="mt-3 space-y-2.5">
+          {hasPhone ? (
+            <a
+              href={businessPhoneHref ?? undefined}
+              className="focus-ring flex items-center gap-2 text-sm text-slate-200 transition hover:text-white"
+            >
+              <Phone className="h-4 w-4 shrink-0" />
+
+              <span>{businessConfig.phoneDisplay}</span>
+            </a>
+          ) : null}
+
+          {hasEmail ? (
+            <a
+              href={businessEmailHref ?? undefined}
+              className="focus-ring flex items-center gap-2 text-sm text-slate-200 transition hover:text-white"
+            >
+              <Mail className="h-4 w-4 shrink-0" />
+
+              <span className="break-all">{businessConfig.email}</span>
+            </a>
+          ) : null}
+        </div>
+
+        <Link
+          to="/contact"
+          className="focus-ring mt-4 inline-flex min-h-9 w-full items-center justify-center rounded-lg bg-white px-4 py-2 text-sm font-bold text-navy-950 transition hover:bg-brand-50"
+        >
+          Send a General Message
+        </Link>
+      </div>
+    </section>
   );
 }
 
@@ -1092,37 +1253,38 @@ function BookingConfirmation({
     <div
       role="status"
       aria-live="polite"
-      className="rounded-3xl border border-slate-200 bg-white p-8 text-center shadow-sm sm:p-12"
+      className="rounded-2xl border border-slate-200 bg-white p-6 text-center shadow-sm sm:p-8"
     >
-      <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-green-100 text-green-700">
-        <CheckCircle2 className="h-9 w-9" aria-hidden="true" />
+      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+        <CheckCircle2 className="h-8 w-8" aria-hidden="true" />
       </div>
 
-      <p className="mt-6 text-sm font-extrabold uppercase tracking-[0.18em] text-green-700">
+      <p className="mt-5 text-xs font-extrabold uppercase tracking-[0.16em] text-emerald-700">
         {isDevelopmentFallback
           ? "Development Confirmation"
           : "Request Received"}
       </p>
 
-      <h2 className="mt-3 font-display text-3xl font-black text-navy-950 sm:text-4xl">
+      <h2 className="mt-2 font-display text-2xl font-black text-navy-950 sm:text-3xl">
         Thank you, {fullName.trim()}
       </h2>
 
-      <p className="mt-5 leading-8 text-slate-600">{confirmation.message}</p>
+      <p className="mx-auto mt-3 max-w-2xl text-sm leading-7 text-slate-600">
+        {confirmation.message}
+      </p>
 
-      <p className="mt-4 font-semibold text-slate-700">
-        This request is pending and does not yet represent a confirmed
-        appointment.
+      <p className="mt-3 text-sm font-semibold text-slate-700">
+        This request is pending and is not yet a confirmed appointment.
       </p>
 
       {isDevelopmentFallback ? (
-        <p className="mt-5 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold leading-6 text-amber-900">
+        <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold leading-6 text-amber-900">
           The booking API is currently disabled, so this request was not
           transmitted to the backend.
         </p>
       ) : null}
 
-      <dl className="mt-7 rounded-2xl border border-slate-200 bg-slate-50 p-5 text-left">
+      <dl className="mx-auto mt-6 max-w-2xl rounded-xl border border-slate-200 bg-slate-50 p-4 text-left">
         <SummaryRow
           label="Reference number"
           value={confirmation.referenceNumber}
@@ -1158,7 +1320,7 @@ function BookingConfirmation({
       <button
         type="button"
         onClick={onReset}
-        className="focus-ring mt-8 inline-flex min-h-12 items-center justify-center rounded-xl bg-brand-700 px-6 py-3 font-bold text-white transition hover:bg-brand-800"
+        className="focus-ring mt-6 inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-700 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-brand-800"
       >
         Submit Another Request
       </button>
@@ -1167,21 +1329,43 @@ function BookingConfirmation({
 }
 
 interface FormSectionProps {
+  number: number;
   title: string;
   description: string;
+  icon: ReactNode;
   children: ReactNode;
 }
 
-function FormSection({ title, description, children }: FormSectionProps) {
+function FormSection({
+  number,
+  title,
+  description,
+  icon,
+  children,
+}: FormSectionProps) {
   return (
-    <section className="mt-10 border-t border-slate-200 pt-8 first:border-t-0">
-      <h3 className="font-display text-xl font-extrabold text-navy-950">
-        {title}
-      </h3>
+    <section className="rounded-xl border border-slate-200 bg-white p-4 sm:p-5">
+      <div className="flex items-start gap-3">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-700 [&>svg]:h-4 [&>svg]:w-4">
+          {icon}
+        </div>
 
-      <p className="mt-2 text-sm leading-6 text-slate-600">{description}</p>
+        <div>
+          <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-brand-700">
+            Section {number}
+          </p>
 
-      <div className="mt-6">{children}</div>
+          <h3 className="font-display text-lg font-extrabold text-navy-950">
+            {title}
+          </h3>
+
+          <p className="mt-0.5 text-xs leading-5 text-slate-600">
+            {description}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4">{children}</div>
     </section>
   );
 }
@@ -1190,14 +1374,14 @@ function ValidationAlert() {
   return (
     <div
       role="alert"
-      className="mt-8 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-5 text-red-900"
+      className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-900"
     >
-      <CircleAlert className="mt-0.5 h-6 w-6 shrink-0" aria-hidden="true" />
+      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
 
       <div>
-        <h3 className="font-bold">Review the highlighted fields</h3>
+        <h3 className="text-sm font-bold">Review the highlighted fields</h3>
 
-        <p className="mt-1 text-sm leading-6">
+        <p className="mt-0.5 text-sm leading-5">
           Some required booking information is missing or invalid.
         </p>
       </div>
@@ -1213,14 +1397,14 @@ function SubmissionErrorAlert({ error }: SubmissionErrorAlertProps) {
   return (
     <div
       role="alert"
-      className="mt-8 flex items-start gap-3 rounded-2xl border border-red-200 bg-red-50 p-5 text-red-900"
+      className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-red-900"
     >
-      <CircleAlert className="mt-0.5 h-6 w-6 shrink-0" aria-hidden="true" />
+      <CircleAlert className="mt-0.5 h-5 w-5 shrink-0" aria-hidden="true" />
 
       <div>
-        <h3 className="font-bold">{error.title}</h3>
+        <h3 className="text-sm font-bold">{error.title}</h3>
 
-        <p className="mt-1 text-sm leading-6">{error.message}</p>
+        <p className="mt-0.5 text-sm leading-5">{error.message}</p>
       </div>
     </div>
   );
@@ -1245,7 +1429,7 @@ function FormField({
 }: FormFieldProps) {
   return (
     <div>
-      <label htmlFor={name} className="text-sm font-bold text-slate-800">
+      <label htmlFor={name} className="text-xs font-extrabold text-slate-800">
         {label}
 
         {required ? (
@@ -1256,15 +1440,17 @@ function FormField({
       </label>
 
       {hint ? (
-        <span className="ml-2 text-xs font-medium text-slate-500">{hint}</span>
+        <span className="ml-2 text-[11px] font-medium text-slate-500">
+          {hint}
+        </span>
       ) : null}
 
-      <div className="mt-2">{children}</div>
+      <div className="mt-1.5">{children}</div>
 
       {error ? (
         <p
           id={`${name}-error`}
-          className="mt-2 text-sm font-semibold text-red-700"
+          className="mt-1.5 text-xs font-semibold text-red-700"
         >
           {error}
         </p>
@@ -1280,10 +1466,10 @@ interface SummaryRowProps {
 
 function SummaryRow({ label, value }: SummaryRowProps) {
   return (
-    <div className="flex items-start justify-between gap-4 border-b border-slate-200 py-3 first:pt-0 last:border-b-0 last:pb-0">
-      <dt className="font-semibold text-slate-500">{label}</dt>
+    <div className="flex items-start justify-between gap-4 border-b border-slate-200 py-2.5 first:pt-0 last:border-b-0 last:pb-0">
+      <dt className="text-sm font-semibold text-slate-500">{label}</dt>
 
-      <dd className="break-words text-right font-bold text-slate-800">
+      <dd className="break-words text-right text-sm font-bold text-slate-800">
         {value}
       </dd>
     </div>
@@ -1524,7 +1710,9 @@ function getMinimumBookingDate(): string {
 
 function formatDateInputValue(date: Date): string {
   const year = date.getFullYear();
+
   const month = String(date.getMonth() + 1).padStart(2, "0");
+
   const day = String(date.getDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
@@ -1625,7 +1813,7 @@ function prefersReducedMotion(): boolean {
 
 function getInputClass(hasError: boolean): string {
   const baseClass =
-    "focus-ring min-h-12 w-full rounded-xl border bg-white px-4 py-3 outline-none transition";
+    "focus-ring min-h-10 w-full rounded-lg border bg-white px-3 py-2 text-sm text-slate-900 outline-none transition placeholder:text-slate-400";
 
   return hasError
     ? `${baseClass} border-red-400 focus:border-red-600`

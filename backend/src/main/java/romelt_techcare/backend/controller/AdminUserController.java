@@ -28,7 +28,7 @@ import romelt_techcare.backend.dto.AdminUserStatusRequest;
 import romelt_techcare.backend.enums.AdminRole;
 import romelt_techcare.backend.enums.AdminStatus;
 import romelt_techcare.backend.exception.AdminUserManagementException;
-import romelt_techcare.backend.service.AdminUserManagementService;
+import romelt_techcare.backend.service.implement.AdminUserManagementService;
 
 import java.time.Instant;
 import java.util.List;

@@ -1,4 +1,4 @@
-package romelt_techcare.backend.service;
+package romelt_techcare.backend.service.implement;
 
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Sort;

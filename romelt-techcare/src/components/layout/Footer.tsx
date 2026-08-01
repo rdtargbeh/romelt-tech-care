@@ -15,6 +15,12 @@
  * - Provides links to legal and accessibility pages.
  * - Maintains accessible keyboard and screen-reader behavior.
  *
+ * Brand palette:
+ * - Primary Blue: #1976D2
+ * - Deep Navy: #0B2545
+ * - Premium Gold: #D4AF37
+ * - Crimson Accent: #C62828
+ *
  * Real-data integration:
  * Business identity, contact information, operating hours, service
  * areas, and availability are currently loaded from the centralized
@@ -71,24 +77,24 @@ export function Footer() {
     : "Contact us for current service availability";
 
   return (
-    <footer className="bg-navy-950 text-white">
+    <footer className="bg-[#0B2545] text-white">
       <Container>
         <div className="grid gap-10 py-14 sm:grid-cols-2 lg:grid-cols-[1.4fr_0.8fr_1fr_1.2fr] lg:gap-12 lg:py-18">
           <div>
             <BrandLogo variant="light" showTagline />
 
-            <p className="mt-5 max-w-md text-sm leading-7 text-slate-300">
+            <p className="mt-5 max-w-md text-sm leading-7 text-[#D6E3F0]">
               Honest, convenient technology support for Iowa homes, remote
               workers, small businesses, churches, and nonprofit organizations.
             </p>
 
-            <p className="mt-5 font-display text-base font-bold text-brand-200">
+            <p className="mt-5 font-display text-base font-bold text-[#D4AF37]">
               {businessConfig.tagline}
             </p>
 
             <Link
               to="/book"
-              className="focus-ring mt-6 inline-flex items-center gap-2 rounded-lg border border-brand-300/30 bg-brand-400/10 px-4 py-2.5 text-sm font-bold text-brand-100 transition hover:border-brand-300/50 hover:bg-brand-400/20 hover:text-white"
+              className="focus-ring mt-6 inline-flex items-center gap-2 rounded-lg border border-[#D4AF37]/50 bg-[#D4AF37]/10 px-4 py-2.5 text-sm font-bold !text-white transition hover:border-[#D4AF37] hover:bg-[#D4AF37]/20 hover:!text-white"
             >
               Book a Service
               <ArrowUpRight aria-hidden="true" className="h-4 w-4" />
@@ -98,7 +104,7 @@ export function Footer() {
           <nav aria-labelledby="footer-explore-heading">
             <h2
               id="footer-explore-heading"
-              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-brand-200"
+              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-[#D4AF37]"
             >
               Explore
             </h2>
@@ -108,7 +114,7 @@ export function Footer() {
                 <li key={item.path}>
                   <Link
                     to={item.path}
-                    className="focus-ring inline-flex rounded-md text-sm text-slate-300 transition hover:translate-x-0.5 hover:text-white"
+                    className="focus-ring inline-flex rounded-md text-sm !text-[#D6E3F0] transition hover:translate-x-0.5 hover:!text-white"
                   >
                     {item.label}
                   </Link>
@@ -120,7 +126,7 @@ export function Footer() {
           <nav aria-labelledby="footer-services-heading">
             <h2
               id="footer-services-heading"
-              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-brand-200"
+              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-[#D4AF37]"
             >
               Services
             </h2>
@@ -130,7 +136,7 @@ export function Footer() {
                 <li key={service.path}>
                   <Link
                     to={service.path}
-                    className="focus-ring inline-flex rounded-md text-sm text-slate-300 transition hover:translate-x-0.5 hover:text-white"
+                    className="focus-ring inline-flex rounded-md text-sm !text-[#D6E3F0] transition hover:translate-x-0.5 hover:!text-white"
                   >
                     {service.label}
                   </Link>
@@ -142,22 +148,22 @@ export function Footer() {
           <section aria-labelledby="footer-contact-heading">
             <h2
               id="footer-contact-heading"
-              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-brand-200"
+              className="font-display text-sm font-extrabold uppercase tracking-[0.16em] text-[#D4AF37]"
             >
               Contact
             </h2>
 
-            <ul className="mt-5 space-y-4 text-sm text-slate-300">
+            <ul className="mt-5 space-y-4 text-sm text-[#D6E3F0]">
               <li className="flex items-start gap-3">
                 <Phone
                   aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-brand-300"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-[#D4AF37]"
                 />
 
                 {businessPhoneHref ? (
                   <a
                     href={businessPhoneHref}
-                    className="focus-ring rounded-md transition hover:text-white"
+                    className="focus-ring rounded-md text-[#D6E3F0] transition hover:text-white"
                   >
                     {businessConfig.phoneDisplay}
                   </a>
@@ -169,13 +175,13 @@ export function Footer() {
               <li className="flex items-start gap-3">
                 <Mail
                   aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-brand-300"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-[#D4AF37]"
                 />
 
                 {businessEmailHref ? (
                   <a
                     href={businessEmailHref}
-                    className="focus-ring break-all rounded-md transition hover:text-white"
+                    className="focus-ring break-all rounded-md text-[#D6E3F0] transition hover:text-white"
                   >
                     {businessConfig.email}
                   </a>
@@ -187,7 +193,7 @@ export function Footer() {
               <li className="flex items-start gap-3">
                 <MapPin
                   aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-brand-300"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-[#D4AF37]"
                 />
 
                 <span>{businessConfig.serviceArea}</span>
@@ -196,7 +202,7 @@ export function Footer() {
               <li className="flex items-start gap-3">
                 <Clock3
                   aria-hidden="true"
-                  className="mt-0.5 h-4 w-4 shrink-0 text-brand-300"
+                  className="mt-0.5 h-4 w-4 shrink-0 text-[#D4AF37]"
                 />
 
                 <span>{appointmentMessage}</span>
@@ -205,7 +211,7 @@ export function Footer() {
 
             <Link
               to="/contact"
-              className="focus-ring mt-5 inline-flex items-center gap-1.5 rounded-md text-sm font-bold text-brand-200 transition hover:text-white"
+              className="focus-ring mt-5 inline-flex items-center gap-1.5 rounded-md text-sm font-bold !text-[#D4AF37] transition hover:!text-white"
             >
               Contact Romelt TechCare
               <ArrowUpRight aria-hidden="true" className="h-4 w-4" />
@@ -213,7 +219,7 @@ export function Footer() {
           </section>
         </div>
 
-        <div className="flex flex-col gap-4 border-t border-white/10 py-6 text-xs text-slate-400 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-4 border-t border-[#D4AF37]/20 py-6 text-xs text-[#AFC3D7] sm:flex-row sm:items-center sm:justify-between">
           <p>
             © {currentYear} {businessConfig.name}. All rights reserved.
           </p>
@@ -224,21 +230,21 @@ export function Footer() {
           >
             <Link
               to="/privacy"
-              className="focus-ring rounded-md transition hover:text-white"
+              className="focus-ring rounded-md !text-[#AFC3D7] transition hover:!text-white"
             >
               Privacy
             </Link>
 
             <Link
               to="/terms"
-              className="focus-ring rounded-md transition hover:text-white"
+              className="focus-ring rounded-md !text-[#AFC3D7] transition hover:!text-white"
             >
               Terms
             </Link>
 
             <Link
               to="/accessibility"
-              className="focus-ring rounded-md transition hover:text-white"
+              className="focus-ring rounded-md !text-[#AFC3D7] transition hover:!text-white"
             >
               Accessibility
             </Link>

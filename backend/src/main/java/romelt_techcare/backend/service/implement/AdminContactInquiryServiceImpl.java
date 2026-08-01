@@ -1,4 +1,4 @@
-package romelt_techcare.backend.service;
+package romelt_techcare.backend.service.implement;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -17,6 +17,7 @@ import romelt_techcare.backend.exception.AdminAuthenticationException;
 import romelt_techcare.backend.exception.PublicRequestRejectedException;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.ContactInquiryRepository;
+import romelt_techcare.backend.service.AdminContactInquiryService;
 
 import java.util.UUID;
 
