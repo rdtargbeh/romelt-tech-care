@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -11,14 +12,20 @@ import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteBusinessHourException;
 import romelt_techcare.backend.entity.WebsiteBusinessProfile;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteBusinessHourExceptionRepository;
 import romelt_techcare.backend.repository.WebsiteBusinessProfileRepository;
 import romelt_techcare.backend.service.WebsiteBusinessHourExceptionService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -39,13 +46,10 @@ import java.util.UUID;
  * - Clears times when an exception represents a closure.
  * - Retrieves ordered public and administrator exception data.
  * - Attributes writes to an authenticated administrator.
+ * - Records immutable audit events for every mutation.
  *
  * Publishing behavior:
  * Exception changes become public immediately after persistence.
- *
- * Date behavior:
- * Past exceptions are retained unless explicitly deleted. This supports
- * historical schedule review and audit logging.
  * ================================================================
  */
 @Service
@@ -60,7 +64,14 @@ public class WebsiteBusinessHourExceptionServiceImplementation
     private final WebsiteBusinessProfileRepository
             websiteBusinessProfileRepository;
 
-    private final AdminUserRepository adminUserRepository;
+    private final AdminUserRepository
+            adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -74,13 +85,17 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 "Business profile ID"
         );
 
-        validateRequestedException(requestedException);
+        validateRequestedException(
+                requestedException
+        );
 
         AdminUser administrator =
                 getRequiredAdministrator(administratorId);
 
         WebsiteBusinessProfile businessProfile =
-                getRequiredBusinessProfile(businessProfileId);
+                getRequiredBusinessProfile(
+                        businessProfileId
+                );
 
         if (
                 websiteBusinessHourExceptionRepository
@@ -97,7 +112,9 @@ public class WebsiteBusinessHourExceptionServiceImplementation
 
         WebsiteBusinessHourException exception =
                 WebsiteBusinessHourException.builder()
-                        .businessProfile(businessProfile)
+                        .businessProfile(
+                                businessProfile
+                        )
                         .exceptionDate(
                                 requestedException.getExceptionDate()
                         )
@@ -128,7 +145,18 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveException(exception);
+        WebsiteBusinessHourException savedException =
+                saveException(exception);
+
+        recordExceptionAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedException,
+                null,
+                "Website business-hour exception created."
+        );
+
+        return savedException;
     }
 
     @Override
@@ -143,7 +171,9 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 "Business-hour exception ID"
         );
 
-        validateRequestedException(requestedException);
+        validateRequestedException(
+                requestedException
+        );
 
         AdminUser administrator =
                 getRequiredAdministrator(administratorId);
@@ -151,6 +181,11 @@ public class WebsiteBusinessHourExceptionServiceImplementation
         WebsiteBusinessHourException existingException =
                 getExceptionForUpdate(
                         businessHourExceptionId
+                );
+
+        JsonNode beforeSnapshot =
+                createExceptionSnapshot(
+                        existingException
                 );
 
         UUID businessProfileId =
@@ -187,7 +222,18 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 administrator
         );
 
-        return saveException(existingException);
+        WebsiteBusinessHourException savedException =
+                saveException(existingException);
+
+        recordExceptionAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedException,
+                beforeSnapshot,
+                "Website business-hour exception updated."
+        );
+
+        return savedException;
     }
 
     @Override
@@ -202,15 +248,19 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 "Business profile ID"
         );
 
-        validateRequestedException(requestedException);
+        validateRequestedException(
+                requestedException
+        );
 
         AdminUser administrator =
                 getRequiredAdministrator(administratorId);
 
         WebsiteBusinessProfile businessProfile =
-                getRequiredBusinessProfile(businessProfileId);
+                getRequiredBusinessProfile(
+                        businessProfileId
+                );
 
-        WebsiteBusinessHourException exception =
+        WebsiteBusinessHourException existingException =
                 websiteBusinessHourExceptionRepository
                         .findByProfileAndDateForUpdate(
                                 businessProfileId,
@@ -218,15 +268,37 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                         )
                         .orElse(null);
 
-        if (exception == null) {
-            exception = WebsiteBusinessHourException.builder()
-                    .businessProfile(businessProfile)
-                    .exceptionDate(
-                            requestedException.getExceptionDate()
-                    )
-                    .createdByAdminUser(administrator)
-                    .updatedByAdminUser(administrator)
-                    .build();
+        boolean creating =
+                existingException == null;
+
+        JsonNode beforeSnapshot =
+                creating
+                        ? null
+                        : createExceptionSnapshot(
+                        existingException
+                );
+
+        WebsiteBusinessHourException exception;
+
+        if (creating) {
+            exception =
+                    WebsiteBusinessHourException.builder()
+                            .businessProfile(
+                                    businessProfile
+                            )
+                            .exceptionDate(
+                                    requestedException
+                                            .getExceptionDate()
+                            )
+                            .createdByAdminUser(
+                                    administrator
+                            )
+                            .updatedByAdminUser(
+                                    administrator
+                            )
+                            .build();
+        } else {
+            exception = existingException;
         }
 
         exception.updateException(
@@ -244,7 +316,22 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 administrator
         );
 
-        return saveException(exception);
+        WebsiteBusinessHourException savedException =
+                saveException(exception);
+
+        recordExceptionAudit(
+                administratorId,
+                creating
+                        ? WebsiteContentAuditAction.CREATE
+                        : WebsiteContentAuditAction.UPDATE,
+                savedException,
+                beforeSnapshot,
+                creating
+                        ? "Website business-hour exception created through upsert."
+                        : "Website business-hour exception updated through upsert."
+        );
+
+        return savedException;
     }
 
     @Override
@@ -304,7 +391,10 @@ public class WebsiteBusinessHourExceptionServiceImplementation
         );
 
         requirePageable(pageable);
-        getRequiredBusinessProfile(businessProfileId);
+
+        getRequiredBusinessProfile(
+                businessProfileId
+        );
 
         return websiteBusinessHourExceptionRepository
                 .findAllByBusinessProfile_BusinessProfileId(
@@ -325,8 +415,14 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                 "Business profile ID"
         );
 
-        validateDateRange(startDate, endDate);
-        getRequiredBusinessProfile(businessProfileId);
+        validateDateRange(
+                startDate,
+                endDate
+        );
+
+        getRequiredBusinessProfile(
+                businessProfileId
+        );
 
         return websiteBusinessHourExceptionRepository
                 .findAllByBusinessProfile_BusinessProfileIdAndExceptionDateBetweenOrderByExceptionDateAsc(
@@ -352,7 +448,9 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                         ? LocalDate.now()
                         : startDate;
 
-        getRequiredBusinessProfile(businessProfileId);
+        getRequiredBusinessProfile(
+                businessProfileId
+        );
 
         return websiteBusinessHourExceptionRepository
                 .findAllByBusinessProfile_BusinessProfileIdAndExceptionDateGreaterThanEqualOrderByExceptionDateAsc(
@@ -367,7 +465,10 @@ public class WebsiteBusinessHourExceptionServiceImplementation
             LocalDate startDate,
             LocalDate endDate
     ) {
-        validateDateRange(startDate, endDate);
+        validateDateRange(
+                startDate,
+                endDate
+        );
 
         if (
                 !websiteBusinessProfileRepository
@@ -423,8 +524,32 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                         businessHourExceptionId
                 );
 
+        JsonNode beforeSnapshot =
+                createExceptionSnapshot(exception);
+
+        String resourceName =
+                createExceptionResourceName(exception);
+
+        UUID resourceId =
+                exception.getBusinessHourExceptionId();
+
         websiteBusinessHourExceptionRepository.delete(
                 exception
+        );
+
+        websiteBusinessHourExceptionRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType
+                        .BUSINESS_HOUR_EXCEPTION,
+                resourceId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Website business-hour exception deleted.",
+                null
         );
     }
 
@@ -440,12 +565,162 @@ public class WebsiteBusinessHourExceptionServiceImplementation
         );
 
         getRequiredAdministrator(administratorId);
-        getRequiredBusinessProfile(businessProfileId);
 
-        return websiteBusinessHourExceptionRepository
-                .deleteAllByBusinessProfile_BusinessProfileId(
+        WebsiteBusinessProfile businessProfile =
+                getRequiredBusinessProfile(
                         businessProfileId
                 );
+
+        List<WebsiteBusinessHourException> existingExceptions =
+                websiteBusinessHourExceptionRepository
+                        .findAllByBusinessProfile_BusinessProfileIdAndExceptionDateGreaterThanEqualOrderByExceptionDateAsc(
+                                businessProfileId,
+                                LocalDate.MIN
+                        );
+
+        long deletedCount =
+                websiteBusinessHourExceptionRepository
+                        .deleteAllByBusinessProfile_BusinessProfileId(
+                                businessProfileId
+                        );
+
+        websiteBusinessHourExceptionRepository.flush();
+
+        for (
+                WebsiteBusinessHourException exception
+                : existingExceptions
+        ) {
+            websiteContentAuditLogService.recordAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.DELETE,
+                    WebsiteContentAuditResourceType
+                            .BUSINESS_HOUR_EXCEPTION,
+                    exception.getBusinessHourExceptionId(),
+                    createExceptionResourceName(exception),
+                    createExceptionSnapshot(exception),
+                    null,
+                    "Website business-hour exception deleted with profile exceptions.",
+                    null
+            );
+        }
+
+        if (
+                existingExceptions.isEmpty()
+                        && deletedCount > 0
+        ) {
+            websiteContentAuditLogService.recordAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.DELETE,
+                    WebsiteContentAuditResourceType
+                            .BUSINESS_HOUR_EXCEPTION,
+                    businessProfileId,
+                    businessProfile.getBusinessName(),
+                    null,
+                    null,
+                    "Deleted "
+                            + deletedCount
+                            + " business-hour exceptions for the profile.",
+                    null
+            );
+        }
+
+        return deletedCount;
+    }
+
+    private void recordExceptionAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteBusinessHourException exception,
+            JsonNode beforeSnapshot,
+            String summary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType
+                        .BUSINESS_HOUR_EXCEPTION,
+                exception.getBusinessHourExceptionId(),
+                createExceptionResourceName(exception),
+                beforeSnapshot,
+                createExceptionSnapshot(exception),
+                summary,
+                null
+        );
+    }
+
+    private JsonNode createExceptionSnapshot(
+            WebsiteBusinessHourException exception
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "businessHourExceptionId",
+                exception.getBusinessHourExceptionId()
+        );
+
+        fields.put(
+                "businessProfileId",
+                exception.getBusinessProfile() == null
+                        ? null
+                        : exception
+                        .getBusinessProfile()
+                        .getBusinessProfileId()
+        );
+
+        fields.put(
+                "exceptionDate",
+                exception.getExceptionDate()
+        );
+
+        fields.put(
+                "exceptionName",
+                exception.getExceptionName()
+        );
+
+        fields.put(
+                "isClosed",
+                exception.getIsClosed()
+        );
+
+        fields.put(
+                "isByAppointment",
+                exception.getIsByAppointment()
+        );
+
+        fields.put(
+                "openingTime",
+                exception.getOpeningTime()
+        );
+
+        fields.put(
+                "closingTime",
+                exception.getClosingTime()
+        );
+
+        fields.put(
+                "displayText",
+                exception.getDisplayText()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createExceptionResourceName(
+            WebsiteBusinessHourException exception
+    ) {
+        String exceptionName =
+                normalizeOptional(
+                        exception.getExceptionName()
+                );
+
+        if (exceptionName != null) {
+            return exceptionName;
+        }
+
+        return "Business Hour Exception - "
+                + exception.getExceptionDate();
     }
 
     private WebsiteBusinessHourException getExceptionForUpdate(
@@ -524,7 +799,9 @@ public class WebsiteBusinessHourExceptionServiceImplementation
         }
 
         boolean closed =
-                resolveClosed(exception.getIsClosed());
+                resolveClosed(
+                        exception.getIsClosed()
+                );
 
         LocalTime openingTime =
                 exception.getOpeningTime();
@@ -561,8 +838,15 @@ public class WebsiteBusinessHourExceptionServiceImplementation
             LocalDate startDate,
             LocalDate endDate
     ) {
-        requireDate(startDate, "Start date");
-        requireDate(endDate, "End date");
+        requireDate(
+                startDate,
+                "Start date"
+        );
+
+        requireDate(
+                endDate,
+                "End date"
+        );
 
         if (endDate.isBefore(startDate)) {
             throw badRequest(
@@ -629,6 +913,21 @@ public class WebsiteBusinessHourExceptionServiceImplementation
                     fieldName + " is required."
             );
         }
+    }
+
+    private String normalizeOptional(
+            String value
+    ) {
+        if (value == null) {
+            return null;
+        }
+
+        String normalized =
+                value.trim();
+
+        return normalized.isEmpty()
+                ? null
+                : normalized;
     }
 
     private ResponseStatusException badRequest(

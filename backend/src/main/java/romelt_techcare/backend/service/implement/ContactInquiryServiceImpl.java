@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -7,13 +8,19 @@ import org.springframework.transaction.annotation.Transactional;
 import romelt_techcare.backend.dto.ContactInquiryConfirmationResponse;
 import romelt_techcare.backend.dto.ContactInquiryCreateRequest;
 import romelt_techcare.backend.entity.ContactInquiry;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.mapper.ContactInquiryMapper;
 import romelt_techcare.backend.repository.ContactInquiryRepository;
 import romelt_techcare.backend.service.ContactInquiryService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
 import java.security.SecureRandom;
 import java.time.Year;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * ================================================================
@@ -27,8 +34,9 @@ import java.util.Locale;
  * - Generates a customer-facing reference number.
  * - Normalizes and stores accepted inquiries.
  * - Returns a safe confirmation response.
- * - Provides a future integration point for email notifications,
- *   spam checks, audit logging, and administrative assignments.
+ * - Records an immutable content audit event.
+ * - Provides future integration points for notifications and spam
+ *   processing.
  *
  * Reference format:
  * RTCI-YYYY-XXXXXXXX
@@ -43,16 +51,32 @@ public class ContactInquiryServiceImpl
     private static final String REFERENCE_PREFIX = "RTCI";
     private static final int MAX_REFERENCE_ATTEMPTS = 10;
 
-    private final ContactInquiryRepository contactInquiryRepository;
-    private final ContactInquiryMapper contactInquiryMapper;
+    private final ContactInquiryRepository
+            contactInquiryRepository;
 
-    private final SecureRandom secureRandom = new SecureRandom();
+    private final ContactInquiryMapper
+            contactInquiryMapper;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
+
+    private final SecureRandom secureRandom =
+            new SecureRandom();
 
     @Override
     @Transactional
     public ContactInquiryConfirmationResponse createInquiry(
             ContactInquiryCreateRequest request
     ) {
+        if (request == null) {
+            throw new IllegalArgumentException(
+                    "Contact inquiry information is required."
+            );
+        }
+
         String referenceNumber =
                 generateUniqueReferenceNumber();
 
@@ -63,7 +87,24 @@ public class ContactInquiryServiceImpl
                 );
 
         ContactInquiry savedInquiry =
-                contactInquiryRepository.save(inquiry);
+                contactInquiryRepository.saveAndFlush(
+                        inquiry
+                );
+
+        JsonNode afterSnapshot =
+                createInquirySnapshot(savedInquiry);
+
+        websiteContentAuditLogService.recordAudit(
+                null,
+                WebsiteContentAuditAction.CREATE,
+                WebsiteContentAuditResourceType.CONTACT_INQUIRY,
+                savedInquiry.getContactInquiryId(),
+                savedInquiry.getReferenceNumber(),
+                null,
+                afterSnapshot,
+                "Public contact inquiry submitted.",
+                null
+        );
 
         log.info(
                 "Public contact inquiry created. inquiryId={}, referenceNumber={}",
@@ -75,12 +116,36 @@ public class ContactInquiryServiceImpl
          * Future production integrations:
          * - Notify the business owner by email.
          * - Send a customer acknowledgement email.
-         * - Record an audit or communication event.
          * - Run anti-spam and rate-limit checks.
          */
 
         return contactInquiryMapper
                 .toConfirmationResponse(savedInquiry);
+    }
+
+    private JsonNode createInquirySnapshot(
+            ContactInquiry inquiry
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "contactInquiryId",
+                inquiry.getContactInquiryId()
+        );
+
+        fields.put(
+                "referenceNumber",
+                inquiry.getReferenceNumber()
+        );
+
+        fields.put(
+                "status",
+                inquiry.getStatus()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
     }
 
     private String generateUniqueReferenceNumber() {

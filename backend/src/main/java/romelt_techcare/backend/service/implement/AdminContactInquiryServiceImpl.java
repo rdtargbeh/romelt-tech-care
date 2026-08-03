@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -13,12 +14,18 @@ import romelt_techcare.backend.dto.AdminJwtPrincipal;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.ContactInquiry;
 import romelt_techcare.backend.enums.ContactInquiryStatus;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.exception.AdminAuthenticationException;
 import romelt_techcare.backend.exception.PublicRequestRejectedException;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.ContactInquiryRepository;
 import romelt_techcare.backend.service.AdminContactInquiryService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -33,6 +40,7 @@ import java.util.UUID;
  * - Retrieves contact inquiry list and detail records.
  * - Updates inquiry lifecycle status.
  * - Verifies the authenticated administrator before write operations.
+ * - Records immutable audit events for inquiry status changes.
  *
  * Inquiry lifecycle:
  * NEW → IN_PROGRESS → RESPONDED → CLOSED
@@ -52,6 +60,12 @@ public class AdminContactInquiryServiceImpl
 
     private final AdminUserRepository
             adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional(readOnly = true)
@@ -98,6 +112,9 @@ public class AdminContactInquiryServiceImpl
         ContactInquiry contactInquiry =
                 findContactInquiry(contactInquiryId);
 
+        JsonNode beforeSnapshot =
+                createInquirySnapshot(contactInquiry);
+
         ContactInquiryStatus previousStatus =
                 contactInquiry.getStatus();
 
@@ -106,9 +123,28 @@ public class AdminContactInquiryServiceImpl
         );
 
         ContactInquiry savedInquiry =
-                contactInquiryRepository.save(
+                contactInquiryRepository.saveAndFlush(
                         contactInquiry
                 );
+
+        JsonNode afterSnapshot =
+                createInquirySnapshot(savedInquiry);
+
+        websiteContentAuditLogService.recordAudit(
+                administrator.getAdminUserId(),
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.CONTACT_INQUIRY,
+                savedInquiry.getContactInquiryId(),
+                savedInquiry.getReferenceNumber(),
+                beforeSnapshot,
+                afterSnapshot,
+                "Contact inquiry status changed from "
+                        + previousStatus
+                        + " to "
+                        + savedInquiry.getStatus()
+                        + ".",
+                null
+        );
 
         log.info(
                 "Contact inquiry status updated. contactInquiryId={}, referenceNumber={}, previousStatus={}, newStatus={}, updatedByAdminUserId={}",
@@ -122,6 +158,31 @@ public class AdminContactInquiryServiceImpl
         return AdminContactInquiryResponse.from(
                 savedInquiry
         );
+    }
+
+    private JsonNode createInquirySnapshot(
+            ContactInquiry contactInquiry
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "contactInquiryId",
+                contactInquiry.getContactInquiryId()
+        );
+
+        fields.put(
+                "referenceNumber",
+                contactInquiry.getReferenceNumber()
+        );
+
+        fields.put(
+                "status",
+                contactInquiry.getStatus()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
     }
 
     private ContactInquiry findContactInquiry(
@@ -157,31 +218,34 @@ public class AdminContactInquiryServiceImpl
                                         ::accountNotFound
                         );
 
-        if (administrator.getAdminUserId() == null
-                || !administrator.getAdminUserId()
-                .equals(principal.adminUserId())) {
-
+        if (
+                administrator.getAdminUserId() == null
+                        || !administrator.getAdminUserId()
+                        .equals(principal.adminUserId())
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
 
-        if (administrator.getEmail() == null
-                || principal.email() == null
-                || !administrator.getEmail()
-                .trim()
-                .equalsIgnoreCase(
-                        principal.email().trim()
-                )) {
-
+        if (
+                administrator.getEmail() == null
+                        || principal.email() == null
+                        || !administrator.getEmail()
+                        .trim()
+                        .equalsIgnoreCase(
+                                principal.email().trim()
+                        )
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
 
-        if (administrator.getRole() == null
-                || principal.role() == null
-                || administrator.getRole()
-                != principal.role()) {
-
+        if (
+                administrator.getRole() == null
+                        || principal.role() == null
+                        || administrator.getRole()
+                        != principal.role()
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
@@ -208,12 +272,13 @@ public class AdminContactInquiryServiceImpl
     private void requirePrincipal(
             AdminJwtPrincipal principal
     ) {
-        if (principal == null
-                || principal.adminUserId() == null
-                || principal.email() == null
-                || principal.email().isBlank()
-                || principal.role() == null) {
-
+        if (
+                principal == null
+                        || principal.adminUserId() == null
+                        || principal.email() == null
+                        || principal.email().isBlank()
+                        || principal.role() == null
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }

@@ -1,7 +1,7 @@
 package romelt_techcare.backend.mapper;
 
-
 import org.springframework.stereotype.Component;
+import romelt_techcare.backend.dto.PublicWebsiteMediaAssetResponse;
 import romelt_techcare.backend.dto.WebsiteMediaAssetCreateRequest;
 import romelt_techcare.backend.dto.WebsiteMediaAssetResponse;
 import romelt_techcare.backend.dto.WebsiteMediaAssetUpdateRequest;
@@ -23,7 +23,8 @@ import java.util.UUID;
  * Responsibilities:
  * - Converts create requests into new entity instances.
  * - Converts update requests into service-compatible entity instances.
- * - Converts persisted media entities into safe API responses.
+ * - Converts persisted media entities into administrator responses.
+ * - Converts eligible media entities into public responses.
  * - Extracts limited administrator identity information.
  * - Avoids exposing full entity graphs through controllers.
  *
@@ -128,10 +129,11 @@ public class WebsiteMediaAssetMapper {
     }
 
     /**
-     * Converts a persisted media entity into an API response.
+     * Converts a persisted media entity into an administrator-facing
+     * API response.
      *
      * @param mediaAsset persisted media asset
-     * @return safe media response
+     * @return complete safe administrator media response
      */
     public WebsiteMediaAssetResponse toResponse(
             WebsiteMediaAsset mediaAsset
@@ -193,8 +195,36 @@ public class WebsiteMediaAssetMapper {
     }
 
     /**
-     * Extracts the administrator identifier without exposing the entire
-     * administrator entity.
+     * Converts an eligible media asset into the restricted public
+     * website response.
+     *
+     * Security:
+     * Only active, public, non-deleted media assets may be exposed.
+     *
+     * @param mediaAsset persisted media asset
+     * @return safe public media response, or null when no asset exists
+     * @throws IllegalStateException when the asset is not publicly
+     *                               available
+     */
+    public PublicWebsiteMediaAssetResponse toPublicResponse(
+            WebsiteMediaAsset mediaAsset
+    ) {
+        if (mediaAsset == null) {
+            return null;
+        }
+
+        if (!mediaAsset.isPubliclyAvailable()) {
+            throw new IllegalStateException(
+                    "The website media asset is not publicly available."
+            );
+        }
+
+        return PublicWebsiteMediaAssetResponse.from(mediaAsset);
+    }
+
+    /**
+     * Extracts the administrator identifier without exposing the
+     * complete administrator entity.
      */
     private UUID getAdminUserId(
             AdminUser adminUser
@@ -207,8 +237,8 @@ public class WebsiteMediaAssetMapper {
     /**
      * Produces a display-safe administrator name.
      *
-     * The method uses first and last name when available and falls back
-     * to the administrator email address.
+     * Uses first and last name when available and falls back to the
+     * administrator email address.
      */
     private String getAdminUserDisplayName(
             AdminUser adminUser
@@ -218,10 +248,14 @@ public class WebsiteMediaAssetMapper {
         }
 
         String firstName =
-                normalizeOptional(adminUser.getFirstName());
+                normalizeOptional(
+                        adminUser.getFirstName()
+                );
 
         String lastName =
-                normalizeOptional(adminUser.getLastName());
+                normalizeOptional(
+                        adminUser.getLastName()
+                );
 
         if (firstName != null && lastName != null) {
             return firstName + " " + lastName;
@@ -235,11 +269,13 @@ public class WebsiteMediaAssetMapper {
             return lastName;
         }
 
-        return normalizeOptional(adminUser.getEmail());
+        return normalizeOptional(
+                adminUser.getEmail()
+        );
     }
 
     /**
-     * Trims optional values and converts blanks to null.
+     * Trims optional values and converts blank strings to null.
      */
     private String normalizeOptional(
             String value

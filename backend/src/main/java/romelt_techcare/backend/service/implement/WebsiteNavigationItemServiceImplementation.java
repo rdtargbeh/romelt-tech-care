@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -11,18 +12,24 @@ import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteNavigationItem;
 import romelt_techcare.backend.entity.WebsitePage;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteNavigationDestinationType;
 import romelt_techcare.backend.enums.WebsiteNavigationLocation;
 import romelt_techcare.backend.enums.WebsiteNavigationTargetBehavior;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteNavigationItemRepository;
 import romelt_techcare.backend.repository.WebsitePageRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteNavigationItemService;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -62,6 +69,12 @@ public class WebsiteNavigationItemServiceImplementation
     private final WebsitePageRepository websitePageRepository;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -147,11 +160,22 @@ public class WebsiteNavigationItemServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveNavigationItem(
-                itemToCreate,
-                "Unable to create the navigation item because the "
-                        + "location and item key are already in use."
+        WebsiteNavigationItem savedItem =
+                saveNavigationItem(
+                        itemToCreate,
+                        "Unable to create the navigation item because the "
+                                + "location and item key are already in use."
+                );
+
+        recordNavigationAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedItem,
+                null,
+                "Website navigation item created."
         );
+
+        return savedItem;
     }
 
     @Override
@@ -179,6 +203,9 @@ public class WebsiteNavigationItemServiceImplementation
                 getNavigationItemForUpdate(
                         navigationItemId
                 );
+
+        JsonNode beforeSnapshot =
+                createNavigationSnapshot(existingItem);
 
         validateEditableFields(requestedUpdate);
 
@@ -234,11 +261,22 @@ public class WebsiteNavigationItemServiceImplementation
                 administrator
         );
 
-        return saveNavigationItem(
-                existingItem,
-                "Unable to update the navigation item because the "
-                        + "location and item key are already in use."
+        WebsiteNavigationItem savedItem =
+                saveNavigationItem(
+                        existingItem,
+                        "Unable to update the navigation item because the "
+                                + "location and item key are already in use."
+                );
+
+        recordNavigationAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedItem,
+                beforeSnapshot,
+                "Website navigation item updated."
         );
+
+        return savedItem;
     }
 
     @Override
@@ -362,14 +400,30 @@ public class WebsiteNavigationItemServiceImplementation
             validatePublicDestination(item);
         }
 
+        JsonNode beforeSnapshot =
+                createNavigationSnapshot(item);
+
         item.updateVisibility(
                 isVisible,
                 administrator
         );
 
-        return websiteNavigationItemRepository.save(
-                item
+        WebsiteNavigationItem savedItem =
+                websiteNavigationItemRepository.save(
+                        item
+                );
+
+        recordNavigationAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedItem,
+                beforeSnapshot,
+                isVisible
+                        ? "Website navigation item made visible."
+                        : "Website navigation item hidden."
         );
+
+        return savedItem;
     }
 
     @Override
@@ -386,9 +440,21 @@ public class WebsiteNavigationItemServiceImplementation
                         navigationItemId
                 );
 
+        JsonNode beforeSnapshot =
+                createNavigationSnapshot(item);
+
         item.softDelete(administrator);
 
-        websiteNavigationItemRepository.save(item);
+        WebsiteNavigationItem savedItem =
+                websiteNavigationItemRepository.save(item);
+
+        recordNavigationAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                savedItem,
+                beforeSnapshot,
+                "Website navigation item soft deleted."
+        );
     }
 
     @Override
@@ -411,11 +477,25 @@ public class WebsiteNavigationItemServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createNavigationSnapshot(item);
+
         item.restore(administrator);
 
-        return websiteNavigationItemRepository.save(
-                item
+        WebsiteNavigationItem savedItem =
+                websiteNavigationItemRepository.save(
+                        item
+                );
+
+        recordNavigationAudit(
+                administratorId,
+                WebsiteContentAuditAction.RESTORE,
+                savedItem,
+                beforeSnapshot,
+                "Website navigation item restored."
         );
+
+        return savedItem;
     }
 
     @Override
@@ -434,6 +514,80 @@ public class WebsiteNavigationItemServiceImplementation
     public long countDeletedNavigationItems() {
         return websiteNavigationItemRepository
                 .countByDeletedAtIsNotNull();
+    }
+
+    /**
+     * Records one immutable audit event for a navigation mutation.
+     */
+    private void recordNavigationAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteNavigationItem item,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.NAVIGATION_ITEM,
+                item.getNavigationItemId(),
+                createNavigationResourceName(item),
+                beforeSnapshot,
+                createNavigationSnapshot(item),
+                changeSummary,
+                null
+        );
+    }
+
+    /**
+     * Creates a controlled navigation-item audit snapshot.
+     */
+    private JsonNode createNavigationSnapshot(
+            WebsiteNavigationItem item
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put("navigationItemId", item.getNavigationItemId());
+        fields.put(
+                "websitePageId",
+                item.getWebsitePage() == null
+                        ? null
+                        : item.getWebsitePage().getWebsitePageId()
+        );
+        fields.put("navigationLocation", item.getNavigationLocation());
+        fields.put("itemKey", item.getItemKey());
+        fields.put("label", item.getLabel());
+        fields.put("destinationType", item.getDestinationType());
+        fields.put("destinationUrl", item.getDestinationUrl());
+        fields.put("targetBehavior", item.getTargetBehavior());
+        fields.put("iconKey", item.getIconKey());
+        fields.put("displayOrder", item.getDisplayOrder());
+        fields.put("isVisible", item.getIsVisible());
+        fields.put("deleted", item.isDeleted());
+        fields.put("deletedAt", item.getDeletedAt());
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    /**
+     * Resolves a readable navigation-item name for audit history.
+     */
+    private String createNavigationResourceName(
+            WebsiteNavigationItem item
+    ) {
+        String label = normalizeOptional(item.getLabel());
+
+        if (label != null) {
+            return label;
+        }
+
+        String itemKey = normalizeOptional(item.getItemKey());
+
+        return itemKey == null
+                ? "Website Navigation Item"
+                : itemKey;
     }
 
     private WebsiteNavigationItem

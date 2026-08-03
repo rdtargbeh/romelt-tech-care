@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -9,15 +10,21 @@ import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteBusinessHour;
 import romelt_techcare.backend.entity.WebsiteBusinessProfile;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteBusinessHourRepository;
 import romelt_techcare.backend.repository.WebsiteBusinessProfileRepository;
 import romelt_techcare.backend.service.WebsiteBusinessHourService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -38,15 +45,12 @@ import java.util.UUID;
  * - Clears times automatically when a day is closed.
  * - Preserves creation attribution during updates.
  * - Records the administrator responsible for each change.
+ * - Records immutable audit events.
  * - Returns ordered schedules for administrator and public consumers.
  *
  * Publishing behavior:
  * Normal business-hour changes become public immediately because this
  * table is read directly by the public website endpoint.
- *
- * Special-date behavior:
- * Holiday and one-date overrides must be managed through the separate
- * WebsiteBusinessHourException module.
  * ================================================================
  */
 @Service
@@ -61,11 +65,15 @@ public class WebsiteBusinessHourServiceImplementation
     private final WebsiteBusinessProfileRepository
             websiteBusinessProfileRepository;
 
-    private final AdminUserRepository adminUserRepository;
+    private final AdminUserRepository
+            adminUserRepository;
 
-    /**
-     * Creates or updates one day.
-     */
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
+
     @Override
     @Transactional
     public WebsiteBusinessHour upsertBusinessHour(
@@ -88,9 +96,13 @@ public class WebsiteBusinessHourServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsiteBusinessProfile businessProfile =
-                getRequiredBusinessProfile(businessProfileId);
+                getRequiredBusinessProfile(
+                        businessProfileId
+                );
 
-        validateRequestedBusinessHour(requestedBusinessHour);
+        validateRequestedBusinessHour(
+                requestedBusinessHour
+        );
 
         Short dayOfWeek =
                 requestedBusinessHour.getDayOfWeek();
@@ -103,15 +115,32 @@ public class WebsiteBusinessHourServiceImplementation
                         )
                         .orElse(null);
 
+        boolean creating =
+                existingBusinessHour == null;
+
+        JsonNode beforeSnapshot =
+                creating
+                        ? null
+                        : createBusinessHourSnapshot(
+                        existingBusinessHour
+                );
+
         WebsiteBusinessHour businessHour;
 
-        if (existingBusinessHour == null) {
-            businessHour = WebsiteBusinessHour.builder()
-                    .businessProfile(businessProfile)
-                    .dayOfWeek(dayOfWeek)
-                    .createdByAdminUser(administrator)
-                    .updatedByAdminUser(administrator)
-                    .build();
+        if (creating) {
+            businessHour =
+                    WebsiteBusinessHour.builder()
+                            .businessProfile(
+                                    businessProfile
+                            )
+                            .dayOfWeek(dayOfWeek)
+                            .createdByAdminUser(
+                                    administrator
+                            )
+                            .updatedByAdminUser(
+                                    administrator
+                            )
+                            .build();
         } else {
             businessHour = existingBusinessHour;
         }
@@ -122,12 +151,24 @@ public class WebsiteBusinessHourServiceImplementation
                 administrator
         );
 
-        return saveBusinessHour(businessHour);
+        WebsiteBusinessHour savedBusinessHour =
+                saveBusinessHour(businessHour);
+
+        recordBusinessHourAudit(
+                administratorId,
+                creating
+                        ? WebsiteContentAuditAction.CREATE
+                        : WebsiteContentAuditAction.UPDATE,
+                savedBusinessHour,
+                beforeSnapshot,
+                creating
+                        ? "Website business-hour entry created."
+                        : "Website business-hour entry updated."
+        );
+
+        return savedBusinessHour;
     }
 
-    /**
-     * Upserts several unique weekdays in one transaction.
-     */
     @Override
     @Transactional
     public List<WebsiteBusinessHour> upsertWeeklyBusinessHours(
@@ -161,7 +202,12 @@ public class WebsiteBusinessHourServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsiteBusinessProfile businessProfile =
-                getRequiredBusinessProfile(businessProfileId);
+                getRequiredBusinessProfile(
+                        businessProfileId
+                );
+
+        List<AuditPendingBusinessHour> auditEntries =
+                new ArrayList<>();
 
         List<WebsiteBusinessHour> savedBusinessHours =
                 new ArrayList<>();
@@ -183,26 +229,44 @@ public class WebsiteBusinessHourServiceImplementation
             Short dayOfWeek =
                     requestedBusinessHour.getDayOfWeek();
 
-            WebsiteBusinessHour businessHour =
+            WebsiteBusinessHour existingBusinessHour =
                     websiteBusinessHourRepository
                             .findByProfileAndDayForUpdate(
                                     businessProfileId,
                                     dayOfWeek
                             )
-                            .orElseGet(() ->
-                                    WebsiteBusinessHour.builder()
-                                            .businessProfile(
-                                                    businessProfile
-                                            )
-                                            .dayOfWeek(dayOfWeek)
-                                            .createdByAdminUser(
-                                                    administrator
-                                            )
-                                            .updatedByAdminUser(
-                                                    administrator
-                                            )
-                                            .build()
-                            );
+                            .orElse(null);
+
+            boolean creating =
+                    existingBusinessHour == null;
+
+            JsonNode beforeSnapshot =
+                    creating
+                            ? null
+                            : createBusinessHourSnapshot(
+                            existingBusinessHour
+                    );
+
+            WebsiteBusinessHour businessHour;
+
+            if (creating) {
+                businessHour =
+                        WebsiteBusinessHour.builder()
+                                .businessProfile(
+                                        businessProfile
+                                )
+                                .dayOfWeek(dayOfWeek)
+                                .createdByAdminUser(
+                                        administrator
+                                )
+                                .updatedByAdminUser(
+                                        administrator
+                                )
+                                .build();
+            } else {
+                businessHour =
+                        existingBusinessHour;
+            }
 
             applyRequestedSchedule(
                     businessHour,
@@ -210,9 +274,20 @@ public class WebsiteBusinessHourServiceImplementation
                     administrator
             );
 
-            savedBusinessHours.add(
+            WebsiteBusinessHour savedBusinessHour =
                     websiteBusinessHourRepository.save(
                             businessHour
+                    );
+
+            savedBusinessHours.add(
+                    savedBusinessHour
+            );
+
+            auditEntries.add(
+                    new AuditPendingBusinessHour(
+                            savedBusinessHour,
+                            beforeSnapshot,
+                            creating
                     )
             );
         }
@@ -225,6 +300,23 @@ public class WebsiteBusinessHourServiceImplementation
                     "The weekly schedule contains a duplicate business "
                             + "profile and day combination.",
                     exception
+            );
+        }
+
+        for (
+                AuditPendingBusinessHour auditEntry
+                : auditEntries
+        ) {
+            recordBusinessHourAudit(
+                    administratorId,
+                    auditEntry.creating()
+                            ? WebsiteContentAuditAction.CREATE
+                            : WebsiteContentAuditAction.UPDATE,
+                    auditEntry.businessHour(),
+                    auditEntry.beforeSnapshot(),
+                    auditEntry.creating()
+                            ? "Weekly schedule business-hour entry created."
+                            : "Weekly schedule business-hour entry updated."
             );
         }
 
@@ -325,10 +417,6 @@ public class WebsiteBusinessHourServiceImplementation
                 "Business hour ID"
         );
 
-        /*
-         * Verifies that the acting administrator exists even though the
-         * current schema does not retain deleted-by attribution.
-         */
         getRequiredAdministrator(administratorId);
 
         WebsiteBusinessHour businessHour =
@@ -338,8 +426,35 @@ public class WebsiteBusinessHourServiceImplementation
                                 "Website business hour was not found."
                         ));
 
+        JsonNode beforeSnapshot =
+                createBusinessHourSnapshot(
+                        businessHour
+                );
+
+        String resourceName =
+                createBusinessHourResourceName(
+                        businessHour
+                );
+
+        UUID resourceId =
+                businessHour.getBusinessHourId();
+
         websiteBusinessHourRepository.delete(
                 businessHour
+        );
+
+        websiteBusinessHourRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.BUSINESS_HOUR,
+                resourceId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Website business-hour entry deleted.",
+                null
         );
     }
 
@@ -355,17 +470,159 @@ public class WebsiteBusinessHourServiceImplementation
         );
 
         getRequiredAdministrator(administratorId);
-        getRequiredBusinessProfile(businessProfileId);
 
-        return websiteBusinessHourRepository
-                .deleteAllByBusinessProfile_BusinessProfileId(
+        WebsiteBusinessProfile profile =
+                getRequiredBusinessProfile(
                         businessProfileId
                 );
+
+        List<WebsiteBusinessHour> existingHours =
+                websiteBusinessHourRepository
+                        .findAllByBusinessProfile_BusinessProfileIdOrderByDisplayOrderAscDayOfWeekAsc(
+                                businessProfileId
+                        );
+
+        long deletedCount =
+                websiteBusinessHourRepository
+                        .deleteAllByBusinessProfile_BusinessProfileId(
+                                businessProfileId
+                        );
+
+        websiteBusinessHourRepository.flush();
+
+        for (
+                WebsiteBusinessHour businessHour
+                : existingHours
+        ) {
+            websiteContentAuditLogService.recordAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.DELETE,
+                    WebsiteContentAuditResourceType.BUSINESS_HOUR,
+                    businessHour.getBusinessHourId(),
+                    createBusinessHourResourceName(
+                            businessHour
+                    ),
+                    createBusinessHourSnapshot(
+                            businessHour
+                    ),
+                    null,
+                    "Website business-hour entry deleted with profile schedule.",
+                    null
+            );
+        }
+
+        if (
+                existingHours.isEmpty()
+                        && deletedCount > 0
+        ) {
+            websiteContentAuditLogService.recordAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.DELETE,
+                    WebsiteContentAuditResourceType.BUSINESS_HOUR,
+                    businessProfileId,
+                    profile.getBusinessName(),
+                    null,
+                    null,
+                    "Deleted "
+                            + deletedCount
+                            + " business-hour entries for the profile.",
+                    null
+            );
+        }
+
+        return deletedCount;
     }
 
-    /**
-     * Copies the requested editable fields onto the persistent row.
-     */
+    private void recordBusinessHourAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteBusinessHour businessHour,
+            JsonNode beforeSnapshot,
+            String summary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.BUSINESS_HOUR,
+                businessHour.getBusinessHourId(),
+                createBusinessHourResourceName(
+                        businessHour
+                ),
+                beforeSnapshot,
+                createBusinessHourSnapshot(
+                        businessHour
+                ),
+                summary,
+                null
+        );
+    }
+
+    private JsonNode createBusinessHourSnapshot(
+            WebsiteBusinessHour businessHour
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "businessHourId",
+                businessHour.getBusinessHourId()
+        );
+
+        fields.put(
+                "businessProfileId",
+                businessHour.getBusinessProfile() == null
+                        ? null
+                        : businessHour
+                        .getBusinessProfile()
+                        .getBusinessProfileId()
+        );
+
+        fields.put(
+                "dayOfWeek",
+                businessHour.getDayOfWeek()
+        );
+
+        fields.put(
+                "isClosed",
+                businessHour.getIsClosed()
+        );
+
+        fields.put(
+                "isByAppointment",
+                businessHour.getIsByAppointment()
+        );
+
+        fields.put(
+                "openingTime",
+                businessHour.getOpeningTime()
+        );
+
+        fields.put(
+                "closingTime",
+                businessHour.getClosingTime()
+        );
+
+        fields.put(
+                "displayText",
+                businessHour.getDisplayText()
+        );
+
+        fields.put(
+                "displayOrder",
+                businessHour.getDisplayOrder()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createBusinessHourResourceName(
+            WebsiteBusinessHour businessHour
+    ) {
+        return "Business Hour - Day "
+                + businessHour.getDayOfWeek();
+    }
+
     private void applyRequestedSchedule(
             WebsiteBusinessHour businessHour,
             WebsiteBusinessHour requestedBusinessHour,
@@ -398,9 +655,6 @@ public class WebsiteBusinessHourServiceImplementation
         );
     }
 
-    /**
-     * Validates one requested schedule entry.
-     */
     private void validateRequestedBusinessHour(
             WebsiteBusinessHour businessHour
     ) {
@@ -439,7 +693,8 @@ public class WebsiteBusinessHourServiceImplementation
         }
 
         boolean onlyOneTimeProvided =
-                (openingTime == null) != (closingTime == null);
+                (openingTime == null)
+                        != (closingTime == null);
 
         if (onlyOneTimeProvided) {
             throw badRequest(
@@ -470,9 +725,6 @@ public class WebsiteBusinessHourServiceImplementation
         }
     }
 
-    /**
-     * Rejects duplicate weekday entries in one bulk request.
-     */
     private void validateUniqueDays(
             List<WebsiteBusinessHour> requestedBusinessHours
     ) {
@@ -585,5 +837,12 @@ public class WebsiteBusinessHourServiceImplementation
                 HttpStatus.NOT_FOUND,
                 message
         );
+    }
+
+    private record AuditPendingBusinessHour(
+            WebsiteBusinessHour businessHour,
+            JsonNode beforeSnapshot,
+            boolean creating
+    ) {
     }
 }

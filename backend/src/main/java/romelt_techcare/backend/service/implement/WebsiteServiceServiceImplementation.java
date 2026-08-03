@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -10,13 +11,19 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteService;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteServiceStatus;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteServiceRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteServiceService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -37,6 +44,7 @@ import java.util.UUID;
  * - Supports activation, deactivation, and archival.
  * - Supports soft deletion and restoration.
  * - Records administrator attribution.
+ * - Records immutable content audit entries for service mutations.
  *
  * Version lifecycle:
  * WebsiteServiceVersionServiceImplementation exclusively manages:
@@ -62,6 +70,12 @@ public class WebsiteServiceServiceImplementation
             websiteServiceRepository;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -110,11 +124,22 @@ public class WebsiteServiceServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveWebsiteService(
-                serviceToCreate,
-                "Unable to create the website service because its "
-                        + "code or slug is already in use."
+        WebsiteService savedService =
+                saveWebsiteService(
+                        serviceToCreate,
+                        "Unable to create the website service because its "
+                                + "code or slug is already in use."
+                );
+
+        recordServiceAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedService,
+                null,
+                "Website service created."
         );
+
+        return savedService;
     }
 
     @Override
@@ -141,6 +166,9 @@ public class WebsiteServiceServiceImplementation
         WebsiteService existingService =
                 getWebsiteServiceForUpdate(serviceId);
 
+        JsonNode beforeSnapshot =
+                createServiceSnapshot(existingService);
+
         validateEditableFields(requestedUpdate);
 
         String serviceCode =
@@ -166,11 +194,22 @@ public class WebsiteServiceServiceImplementation
                 administrator
         );
 
-        return saveWebsiteService(
-                existingService,
-                "Unable to update the website service because its "
-                        + "code or slug is already in use."
+        WebsiteService savedService =
+                saveWebsiteService(
+                        existingService,
+                        "Unable to update the website service because its "
+                                + "code or slug is already in use."
+                );
+
+        recordServiceAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedService,
+                beforeSnapshot,
+                "Website service identity updated."
         );
+
+        return savedService;
     }
 
     @Override
@@ -270,6 +309,12 @@ public class WebsiteServiceServiceImplementation
         WebsiteService service =
                 getWebsiteServiceForUpdate(serviceId);
 
+        JsonNode beforeSnapshot =
+                createServiceSnapshot(service);
+
+        WebsiteServiceStatus previousStatus =
+                service.getServiceStatus();
+
         switch (serviceStatus) {
             case ACTIVE ->
                     service.activate(administrator);
@@ -281,7 +326,27 @@ public class WebsiteServiceServiceImplementation
                     service.archive(administrator);
         }
 
-        return websiteServiceRepository.saveAndFlush(service);
+        WebsiteService savedService =
+                websiteServiceRepository.saveAndFlush(service);
+
+        WebsiteContentAuditAction auditAction =
+                serviceStatus == WebsiteServiceStatus.ARCHIVED
+                        ? WebsiteContentAuditAction.ARCHIVE
+                        : WebsiteContentAuditAction.UPDATE;
+
+        recordServiceAudit(
+                administratorId,
+                auditAction,
+                savedService,
+                beforeSnapshot,
+                "Website service status changed from "
+                        + previousStatus
+                        + " to "
+                        + savedService.getServiceStatus()
+                        + "."
+        );
+
+        return savedService;
     }
 
     @Override
@@ -335,9 +400,21 @@ public class WebsiteServiceServiceImplementation
         WebsiteService service =
                 getWebsiteServiceForUpdate(serviceId);
 
+        JsonNode beforeSnapshot =
+                createServiceSnapshot(service);
+
         service.softDelete(administrator);
 
-        websiteServiceRepository.saveAndFlush(service);
+        WebsiteService deletedService =
+                websiteServiceRepository.saveAndFlush(service);
+
+        recordServiceAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                deletedService,
+                beforeSnapshot,
+                "Website service soft deleted."
+        );
     }
 
     @Override
@@ -360,13 +437,28 @@ public class WebsiteServiceServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createServiceSnapshot(service);
+
         service.restore(administrator);
 
         /*
          * Restored services remain inactive until an administrator
          * explicitly activates them.
          */
-        return websiteServiceRepository.saveAndFlush(service);
+        WebsiteService restoredService =
+                websiteServiceRepository.saveAndFlush(service);
+
+        recordServiceAudit(
+                administratorId,
+                WebsiteContentAuditAction.RESTORE,
+                restoredService,
+                beforeSnapshot,
+                "Website service restored. "
+                        + "The restored service remains inactive."
+        );
+
+        return restoredService;
     }
 
     @Override
@@ -431,6 +523,86 @@ public class WebsiteServiceServiceImplementation
     public long countDeletedWebsiteServices() {
         return websiteServiceRepository
                 .countByDeletedAtIsNotNull();
+    }
+
+    private void recordServiceAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteService service,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.SERVICE,
+                service.getServiceId(),
+                service.getServiceCode(),
+                beforeSnapshot,
+                createServiceSnapshot(service),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createServiceSnapshot(
+            WebsiteService service
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "serviceId",
+                service.getServiceId()
+        );
+
+        fields.put(
+                "serviceCode",
+                service.getServiceCode()
+        );
+
+        fields.put(
+                "serviceSlug",
+                service.getServiceSlug()
+        );
+
+        fields.put(
+                "draftVersionId",
+                service.getDraftVersionId()
+        );
+
+        fields.put(
+                "publishedVersionId",
+                service.getPublishedVersionId()
+        );
+
+        fields.put(
+                "serviceStatus",
+                service.getServiceStatus()
+        );
+
+        fields.put(
+                "deleted",
+                service.isDeleted()
+        );
+
+        fields.put(
+                "deletedAt",
+                service.getDeletedAt()
+        );
+
+        fields.put(
+                "createdAt",
+                service.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                service.getUpdatedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
     }
 
     /**

@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -10,15 +11,21 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteMediaAsset;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteMediaAssetStatus;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteMediaAssetRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteMediaAssetService;
 import romelt_techcare.backend.service.WebsiteMediaUsageService;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
@@ -62,6 +69,8 @@ public class WebsiteMediaAssetServiceImplementation
     private final WebsiteMediaAssetRepository websiteMediaAssetRepository;
     private final WebsiteMediaUsageService websiteMediaUsageService;
     private final AdminUserRepository adminUserRepository;
+    private final WebsiteContentAuditLogService websiteContentAuditLogService;
+    private final WebsiteContentAuditSnapshotService websiteContentAuditSnapshotService;
 
     /**
      * Creates a new website media asset.
@@ -130,11 +139,25 @@ public class WebsiteMediaAssetServiceImplementation
         validateLifecycleForCreation(mediaAsset);
         validatePublicAccessibility(mediaAsset);
 
-        return saveMediaAsset(
-                mediaAsset,
-                "Unable to create the media asset because one of its "
-                        + "unique values is already in use."
+        WebsiteMediaAsset savedMediaAsset =
+                saveMediaAsset(
+                        mediaAsset,
+                        "Unable to create the media asset because one of its "
+                                + "unique values is already in use."
+                );
+
+        recordMediaAudit(
+                administratorId,
+                savedMediaAsset.getAssetStatus()
+                        == WebsiteMediaAssetStatus.UPLOADING
+                        ? WebsiteContentAuditAction.UPLOAD
+                        : WebsiteContentAuditAction.CREATE,
+                savedMediaAsset,
+                null,
+                "Website media asset created."
         );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -161,6 +184,9 @@ public class WebsiteMediaAssetServiceImplementation
                 getMediaAssetForUpdate(mediaAssetId);
 
         ensureEditable(existingMediaAsset);
+
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(existingMediaAsset);
 
         String normalizedAssetKey =
                 normalizeAssetKey(requestedUpdate.getAssetKey());
@@ -266,11 +292,22 @@ public class WebsiteMediaAssetServiceImplementation
         validateNumericMetadata(existingMediaAsset);
         validatePublicAccessibility(existingMediaAsset);
 
-        return saveMediaAsset(
-                existingMediaAsset,
-                "Unable to update the media asset because one of its "
-                        + "unique values is already in use."
+        WebsiteMediaAsset savedMediaAsset =
+                saveMediaAsset(
+                        existingMediaAsset,
+                        "Unable to update the media asset because one of its "
+                                + "unique values is already in use."
+                );
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset metadata updated."
         );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -413,6 +450,9 @@ public class WebsiteMediaAssetServiceImplementation
 
         ensureNotDeleted(mediaAsset);
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.setAssetStatus(
                 WebsiteMediaAssetStatus.UPLOADING
         );
@@ -422,7 +462,18 @@ public class WebsiteMediaAssetServiceImplementation
         mediaAsset.setArchivedByAdminUser(null);
         mediaAsset.setUpdatedByAdminUser(administrator);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPLOAD,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset marked as uploading."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -442,9 +493,23 @@ public class WebsiteMediaAssetServiceImplementation
 
         ensureNotDeleted(mediaAsset);
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.markProcessing(administrator);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset marked as processing."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -464,9 +529,23 @@ public class WebsiteMediaAssetServiceImplementation
 
         ensureNotDeleted(mediaAsset);
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.markFailed(administrator);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset processing marked as failed."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -487,6 +566,9 @@ public class WebsiteMediaAssetServiceImplementation
 
         ensureNotDeleted(mediaAsset);
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         validateRequiredMediaFields(mediaAsset);
         validateNumericMetadata(mediaAsset);
 
@@ -495,7 +577,20 @@ public class WebsiteMediaAssetServiceImplementation
 
         validatePublicAccessibility(mediaAsset);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                makePublic
+                        ? "Website media asset activated and made public."
+                        : "Website media asset activated as private."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -522,9 +617,23 @@ public class WebsiteMediaAssetServiceImplementation
             return mediaAsset;
         }
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.archive(administrator);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.ARCHIVE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset archived."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -553,6 +662,9 @@ public class WebsiteMediaAssetServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.restore(administrator);
 
         /*
@@ -561,7 +673,18 @@ public class WebsiteMediaAssetServiceImplementation
          */
         mediaAsset.setIsPublic(false);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.RESTORE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset restored as private."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -591,9 +714,21 @@ public class WebsiteMediaAssetServiceImplementation
                 mediaAssetId
         );
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.softDelete(administrator);
 
-        websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media asset soft deleted."
+        );
     }
 
     /**
@@ -624,12 +759,28 @@ public class WebsiteMediaAssetServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.setIsPublic(isPublic);
         mediaAsset.setUpdatedByAdminUser(administrator);
 
         validatePublicAccessibility(mediaAsset);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                isPublic
+                        ? "Website media asset made public."
+                        : "Website media asset made private."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -651,6 +802,9 @@ public class WebsiteMediaAssetServiceImplementation
 
         ensureNotDeleted(mediaAsset);
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.updateAccessibility(
                 altText,
                 isDecorative,
@@ -659,7 +813,18 @@ public class WebsiteMediaAssetServiceImplementation
 
         validatePublicAccessibility(mediaAsset);
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media accessibility metadata updated."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -691,13 +856,27 @@ public class WebsiteMediaAssetServiceImplementation
                 "Vertical focal point"
         );
 
+        JsonNode beforeSnapshot =
+                createMediaSnapshot(mediaAsset);
+
         mediaAsset.updateFocalPoint(
                 focalPointX,
                 focalPointY,
                 administrator
         );
 
-        return websiteMediaAssetRepository.save(mediaAsset);
+        WebsiteMediaAsset savedMediaAsset =
+                websiteMediaAssetRepository.save(mediaAsset);
+
+        recordMediaAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedMediaAsset,
+                beforeSnapshot,
+                "Website media focal point updated."
+        );
+
+        return savedMediaAsset;
     }
 
     /**
@@ -718,6 +897,89 @@ public class WebsiteMediaAssetServiceImplementation
     public long countDeletedMediaAssets() {
         return websiteMediaAssetRepository
                 .countByDeletedAtIsNotNull();
+    }
+
+    /**
+     * Records one immutable audit event for a media-asset mutation.
+     */
+    private void recordMediaAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteMediaAsset mediaAsset,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.MEDIA_ASSET,
+                mediaAsset.getMediaAssetId(),
+                createMediaResourceName(mediaAsset),
+                beforeSnapshot,
+                createMediaSnapshot(mediaAsset),
+                changeSummary,
+                null
+        );
+    }
+
+    /**
+     * Creates a controlled non-sensitive media snapshot.
+     */
+    private JsonNode createMediaSnapshot(
+            WebsiteMediaAsset mediaAsset
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put("mediaAssetId", mediaAsset.getMediaAssetId());
+        fields.put("fileAttachmentId", mediaAsset.getFileAttachmentId());
+        fields.put("assetKey", mediaAsset.getAssetKey());
+        fields.put("originalFileName", mediaAsset.getOriginalFileName());
+        fields.put("publicUrl", mediaAsset.getPublicUrl());
+        fields.put("mimeType", mediaAsset.getMimeType());
+        fields.put("fileExtension", mediaAsset.getFileExtension());
+        fields.put("fileSizeBytes", mediaAsset.getFileSizeBytes());
+        fields.put("widthPixels", mediaAsset.getWidthPixels());
+        fields.put("heightPixels", mediaAsset.getHeightPixels());
+        fields.put("title", mediaAsset.getTitle());
+        fields.put("altText", mediaAsset.getAltText());
+        fields.put("caption", mediaAsset.getCaption());
+        fields.put("isDecorative", mediaAsset.getIsDecorative());
+        fields.put("focalPointX", mediaAsset.getFocalPointX());
+        fields.put("focalPointY", mediaAsset.getFocalPointY());
+        fields.put("assetStatus", mediaAsset.getAssetStatus());
+        fields.put("isPublic", mediaAsset.getIsPublic());
+        fields.put("archivedAt", mediaAsset.getArchivedAt());
+        fields.put("deletedAt", mediaAsset.getDeletedAt());
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    /**
+     * Resolves a readable audit resource name without exposing storage data.
+     */
+    private String createMediaResourceName(
+            WebsiteMediaAsset mediaAsset
+    ) {
+        String title = normalizeOptional(mediaAsset.getTitle());
+
+        if (title != null) {
+            return title;
+        }
+
+        String assetKey = normalizeOptional(mediaAsset.getAssetKey());
+
+        if (assetKey != null) {
+            return assetKey;
+        }
+
+        String originalFileName =
+                normalizeOptional(mediaAsset.getOriginalFileName());
+
+        return originalFileName == null
+                ? "Website Media Asset"
+                : originalFileName;
     }
 
     /**

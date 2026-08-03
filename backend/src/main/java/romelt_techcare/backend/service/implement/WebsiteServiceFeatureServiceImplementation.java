@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -8,17 +9,24 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
+import romelt_techcare.backend.entity.WebsiteService;
 import romelt_techcare.backend.entity.WebsiteServiceFeature;
 import romelt_techcare.backend.entity.WebsiteServiceVersion;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteServiceVersionStatus;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteServiceFeatureRepository;
 import romelt_techcare.backend.repository.WebsiteServiceVersionRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteServiceFeatureService;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -43,6 +51,10 @@ import java.util.UUID;
  * Public queries return only active features belonging to the current
  * published version of an active, non-deleted, public, and currently
  * effective service.
+ *
+ * Audit behavior:
+ * Service-feature changes are audited against the owning
+ * SERVICE_VERSION resource.
  * ================================================================
  */
 @Service
@@ -58,6 +70,12 @@ public class WebsiteServiceFeatureServiceImplementation
             websiteServiceVersionRepository;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -120,8 +138,19 @@ public class WebsiteServiceFeatureServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return websiteServiceFeatureRepository
-                .saveAndFlush(feature);
+        WebsiteServiceFeature savedFeature =
+                websiteServiceFeatureRepository
+                        .saveAndFlush(feature);
+
+        recordFeatureAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedFeature,
+                null,
+                "Website service feature created."
+        );
+
+        return savedFeature;
     }
 
     @Override
@@ -152,6 +181,9 @@ public class WebsiteServiceFeatureServiceImplementation
                 existingFeature.getServiceVersion()
         );
 
+        JsonNode beforeSnapshot =
+                createFeatureSnapshot(existingFeature);
+
         validateEditableFields(requestedUpdate);
 
         existingFeature.updateDetails(
@@ -167,8 +199,19 @@ public class WebsiteServiceFeatureServiceImplementation
                 administrator
         );
 
-        return websiteServiceFeatureRepository
-                .saveAndFlush(existingFeature);
+        WebsiteServiceFeature savedFeature =
+                websiteServiceFeatureRepository
+                        .saveAndFlush(existingFeature);
+
+        recordFeatureAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedFeature,
+                beforeSnapshot,
+                "Website service feature updated."
+        );
+
+        return savedFeature;
     }
 
     @Override
@@ -235,13 +278,29 @@ public class WebsiteServiceFeatureServiceImplementation
                 feature.getServiceVersion()
         );
 
+        JsonNode beforeSnapshot =
+                createFeatureSnapshot(feature);
+
         feature.updateStatus(
                 isActive,
                 administrator
         );
 
-        return websiteServiceFeatureRepository
-                .saveAndFlush(feature);
+        WebsiteServiceFeature savedFeature =
+                websiteServiceFeatureRepository
+                        .saveAndFlush(feature);
+
+        recordFeatureAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedFeature,
+                beforeSnapshot,
+                isActive
+                        ? "Website service feature activated."
+                        : "Website service feature deactivated."
+        );
+
+        return savedFeature;
     }
 
     @Override
@@ -267,13 +326,27 @@ public class WebsiteServiceFeatureServiceImplementation
                 feature.getServiceVersion()
         );
 
+        JsonNode beforeSnapshot =
+                createFeatureSnapshot(feature);
+
         feature.updateDisplayOrder(
                 displayOrder,
                 administrator
         );
 
-        return websiteServiceFeatureRepository
-                .saveAndFlush(feature);
+        WebsiteServiceFeature savedFeature =
+                websiteServiceFeatureRepository
+                        .saveAndFlush(feature);
+
+        recordFeatureAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedFeature,
+                beforeSnapshot,
+                "Website service feature display order updated."
+        );
+
+        return savedFeature;
     }
 
     @Override
@@ -291,8 +364,34 @@ public class WebsiteServiceFeatureServiceImplementation
                 feature.getServiceVersion()
         );
 
+        JsonNode beforeSnapshot =
+                createFeatureSnapshot(feature);
+
+        WebsiteServiceVersion serviceVersion =
+                feature.getServiceVersion();
+
+        UUID serviceVersionId =
+                serviceVersion.getServiceVersionId();
+
+        String resourceName =
+                createServiceVersionResourceName(
+                        serviceVersion
+                );
+
         websiteServiceFeatureRepository.delete(feature);
         websiteServiceFeatureRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.SERVICE_VERSION,
+                serviceVersionId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Website service feature deleted.",
+                null
+        );
     }
 
     @Override
@@ -341,6 +440,119 @@ public class WebsiteServiceFeatureServiceImplementation
                 .countByServiceVersion_ServiceVersionIdAndIsActiveTrue(
                         serviceVersionId
                 );
+    }
+
+    private void recordFeatureAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteServiceFeature feature,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        WebsiteServiceVersion serviceVersion =
+                feature.getServiceVersion();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.SERVICE_VERSION,
+                serviceVersion.getServiceVersionId(),
+                createServiceVersionResourceName(
+                        serviceVersion
+                ),
+                beforeSnapshot,
+                createFeatureSnapshot(feature),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createFeatureSnapshot(
+            WebsiteServiceFeature feature
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "serviceFeatureId",
+                feature.getServiceFeatureId()
+        );
+
+        fields.put(
+                "serviceVersionId",
+                feature.getServiceVersion() == null
+                        ? null
+                        : feature.getServiceVersion()
+                        .getServiceVersionId()
+        );
+
+        fields.put(
+                "serviceId",
+                feature.getServiceVersion() == null
+                        || feature.getServiceVersion()
+                        .getWebsiteService() == null
+                        ? null
+                        : feature.getServiceVersion()
+                        .getWebsiteService()
+                        .getServiceId()
+        );
+
+        fields.put(
+                "versionNumber",
+                feature.getServiceVersion() == null
+                        ? null
+                        : feature.getServiceVersion()
+                        .getVersionNumber()
+        );
+
+        fields.put(
+                "featureText",
+                feature.getFeatureText()
+        );
+
+        fields.put(
+                "iconKey",
+                feature.getIconKey()
+        );
+
+        fields.put(
+                "displayOrder",
+                feature.getDisplayOrder()
+        );
+
+        fields.put(
+                "isActive",
+                feature.getIsActive()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createServiceVersionResourceName(
+            WebsiteServiceVersion serviceVersion
+    ) {
+        if (serviceVersion == null) {
+            return "Website Service Version";
+        }
+
+        WebsiteService websiteService =
+                serviceVersion.getWebsiteService();
+
+        String serviceCode =
+                websiteService == null
+                        ? null
+                        : normalizeOptional(
+                        websiteService.getServiceCode()
+                );
+
+        if (serviceCode == null) {
+            serviceCode = "WEBSITE_SERVICE";
+        }
+
+        return serviceCode
+                + " - Version "
+                + serviceVersion.getVersionNumber();
     }
 
     private WebsiteServiceFeature getFeatureForUpdate(

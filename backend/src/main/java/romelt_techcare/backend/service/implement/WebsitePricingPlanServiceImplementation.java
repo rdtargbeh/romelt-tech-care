@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -10,13 +11,19 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsitePricingPlan;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsitePricingPlanStatus;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsitePricingPlanRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsitePricingPlanService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -37,11 +44,16 @@ import java.util.UUID;
  * - Supports soft deletion and restoration.
  * - Retrieves active public pricing-plan identities.
  * - Records administrator attribution.
+ * - Records immutable audit entries for pricing-plan mutations.
  *
  * Version lifecycle:
  * Pricing-plan content versions and draft/published pointer changes
- * are not exposed here. They must be controlled by the future
+ * are not exposed here. They must be controlled by
  * WebsitePricingPlanVersionService.
+ *
+ * Audit integration:
+ * Existing public methods, repository calls, entity methods,
+ * validations, and return types are preserved.
  * ================================================================
  */
 @Service
@@ -54,6 +66,12 @@ public class WebsitePricingPlanServiceImplementation
             websitePricingPlanRepository;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -102,11 +120,22 @@ public class WebsitePricingPlanServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return savePricingPlan(
-                planToCreate,
-                "Unable to create the pricing plan because its code "
-                        + "or slug is already in use."
+        WebsitePricingPlan savedPricingPlan =
+                savePricingPlan(
+                        planToCreate,
+                        "Unable to create the pricing plan because its code "
+                                + "or slug is already in use."
+                );
+
+        recordPricingPlanAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedPricingPlan,
+                null,
+                "Website pricing plan created."
         );
+
+        return savedPricingPlan;
     }
 
     @Override
@@ -133,6 +162,9 @@ public class WebsitePricingPlanServiceImplementation
         WebsitePricingPlan existingPlan =
                 getPricingPlanForUpdate(pricingPlanId);
 
+        JsonNode beforeSnapshot =
+                createPricingPlanSnapshot(existingPlan);
+
         validateEditableFields(requestedUpdate);
 
         String planCode =
@@ -158,11 +190,22 @@ public class WebsitePricingPlanServiceImplementation
                 administrator
         );
 
-        return savePricingPlan(
-                existingPlan,
-                "Unable to update the pricing plan because its code "
-                        + "or slug is already in use."
+        WebsitePricingPlan savedPricingPlan =
+                savePricingPlan(
+                        existingPlan,
+                        "Unable to update the pricing plan because its code "
+                                + "or slug is already in use."
+                );
+
+        recordPricingPlanAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedPricingPlan,
+                beforeSnapshot,
+                "Website pricing plan identity updated."
         );
+
+        return savedPricingPlan;
     }
 
     @Override
@@ -255,6 +298,12 @@ public class WebsitePricingPlanServiceImplementation
         WebsitePricingPlan pricingPlan =
                 getPricingPlanForUpdate(pricingPlanId);
 
+        JsonNode beforeSnapshot =
+                createPricingPlanSnapshot(pricingPlan);
+
+        WebsitePricingPlanStatus previousStatus =
+                pricingPlan.getPlanStatus();
+
         switch (planStatus) {
             case ACTIVE ->
                     pricingPlan.activate(administrator);
@@ -266,9 +315,29 @@ public class WebsitePricingPlanServiceImplementation
                     pricingPlan.archive(administrator);
         }
 
-        return websitePricingPlanRepository.saveAndFlush(
-                pricingPlan
+        WebsitePricingPlan savedPricingPlan =
+                websitePricingPlanRepository.saveAndFlush(
+                        pricingPlan
+                );
+
+        WebsiteContentAuditAction auditAction =
+                planStatus == WebsitePricingPlanStatus.ARCHIVED
+                        ? WebsiteContentAuditAction.ARCHIVE
+                        : WebsiteContentAuditAction.UPDATE;
+
+        recordPricingPlanAudit(
+                administratorId,
+                auditAction,
+                savedPricingPlan,
+                beforeSnapshot,
+                "Website pricing plan status changed from "
+                        + previousStatus
+                        + " to "
+                        + savedPricingPlan.getPlanStatus()
+                        + "."
         );
+
+        return savedPricingPlan;
     }
 
     @Override
@@ -322,10 +391,22 @@ public class WebsitePricingPlanServiceImplementation
         WebsitePricingPlan pricingPlan =
                 getPricingPlanForUpdate(pricingPlanId);
 
+        JsonNode beforeSnapshot =
+                createPricingPlanSnapshot(pricingPlan);
+
         pricingPlan.softDelete(administrator);
 
-        websitePricingPlanRepository.saveAndFlush(
-                pricingPlan
+        WebsitePricingPlan deletedPricingPlan =
+                websitePricingPlanRepository.saveAndFlush(
+                        pricingPlan
+                );
+
+        recordPricingPlanAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                deletedPricingPlan,
+                beforeSnapshot,
+                "Website pricing plan soft deleted."
         );
     }
 
@@ -349,15 +430,30 @@ public class WebsitePricingPlanServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createPricingPlanSnapshot(pricingPlan);
+
         pricingPlan.restore(administrator);
 
         /*
          * Restored plans remain inactive until an administrator
          * explicitly activates them.
          */
-        return websitePricingPlanRepository.saveAndFlush(
-                pricingPlan
+        WebsitePricingPlan restoredPricingPlan =
+                websitePricingPlanRepository.saveAndFlush(
+                        pricingPlan
+                );
+
+        recordPricingPlanAudit(
+                administratorId,
+                WebsiteContentAuditAction.RESTORE,
+                restoredPricingPlan,
+                beforeSnapshot,
+                "Website pricing plan restored. "
+                        + "The restored pricing plan remains inactive."
         );
+
+        return restoredPricingPlan;
     }
 
     @Override
@@ -416,6 +512,93 @@ public class WebsitePricingPlanServiceImplementation
     public long countDeletedPricingPlans() {
         return websitePricingPlanRepository
                 .countByDeletedAtIsNotNull();
+    }
+
+    /**
+     * Records one pricing-plan mutation in the content audit log.
+     */
+    private void recordPricingPlanAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsitePricingPlan pricingPlan,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.PRICING_PLAN,
+                pricingPlan.getPricingPlanId(),
+                pricingPlan.getPlanCode(),
+                beforeSnapshot,
+                createPricingPlanSnapshot(pricingPlan),
+                changeSummary,
+                null
+        );
+    }
+
+    /**
+     * Creates a controlled JSON snapshot without serializing the full
+     * entity graph.
+     */
+    private JsonNode createPricingPlanSnapshot(
+            WebsitePricingPlan pricingPlan
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "pricingPlanId",
+                pricingPlan.getPricingPlanId()
+        );
+
+        fields.put(
+                "planCode",
+                pricingPlan.getPlanCode()
+        );
+
+        fields.put(
+                "planSlug",
+                pricingPlan.getPlanSlug()
+        );
+
+        fields.put(
+                "draftVersionId",
+                pricingPlan.getDraftVersionId()
+        );
+
+        fields.put(
+                "publishedVersionId",
+                pricingPlan.getPublishedVersionId()
+        );
+
+        fields.put(
+                "planStatus",
+                pricingPlan.getPlanStatus()
+        );
+
+        fields.put(
+                "deleted",
+                pricingPlan.isDeleted()
+        );
+
+        fields.put(
+                "deletedAt",
+                pricingPlan.getDeletedAt()
+        );
+
+        fields.put(
+                "createdAt",
+                pricingPlan.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                pricingPlan.getUpdatedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
     }
 
     private WebsitePricingPlan getPricingPlanForUpdate(
@@ -608,7 +791,8 @@ public class WebsitePricingPlanServiceImplementation
             int maximumLength,
             String fieldName
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(value);
 
         if (normalized == null) {
             throw badRequest(
@@ -651,7 +835,8 @@ public class WebsitePricingPlanServiceImplementation
             String value,
             String fieldName
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(value);
 
         if (normalized == null) {
             throw badRequest(
@@ -669,7 +854,8 @@ public class WebsitePricingPlanServiceImplementation
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null

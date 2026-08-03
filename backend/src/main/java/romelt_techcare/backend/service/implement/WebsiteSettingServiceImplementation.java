@@ -11,12 +11,18 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteSetting;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteSettingRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteSettingService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -37,18 +43,10 @@ import java.util.UUID;
  * - Supports administrator search and public retrieval.
  * - Uses pessimistic locking for write operations.
  * - Records the administrator responsible for each write.
+ * - Records immutable audit entries for setting mutations.
  *
- * Publishing behavior:
- * Public non-sensitive settings become available immediately after a
- * successful database update.
- *
- * Sensitive-data behavior:
- * A sensitive setting is always forced private. Public queries also
- * require isSensitive to be false, providing defense in depth.
- *
- * Deletion behavior:
- * The supplied schema does not include soft-deletion fields.
- * deleteWebsiteSetting therefore permanently removes the record.
+ * Sensitive-data audit behavior:
+ * Sensitive setting values are never copied into audit snapshots.
  * ================================================================
  */
 @Service
@@ -64,6 +62,12 @@ public class WebsiteSettingServiceImplementation
             websiteSettingRepository;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -137,11 +141,22 @@ public class WebsiteSettingServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveWebsiteSetting(
-                settingToCreate,
-                "A website setting already exists for this group "
-                        + "and key."
+        WebsiteSetting savedSetting =
+                saveWebsiteSetting(
+                        settingToCreate,
+                        "A website setting already exists for this group "
+                                + "and key."
+                );
+
+        recordSettingAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedSetting,
+                null,
+                "Website setting created."
         );
+
+        return savedSetting;
     }
 
     @Override
@@ -169,6 +184,9 @@ public class WebsiteSettingServiceImplementation
                 getWebsiteSettingForUpdate(
                         websiteSettingId
                 );
+
+        JsonNode beforeSnapshot =
+                createSettingSnapshot(existingSetting);
 
         String normalizedGroup =
                 normalizeSettingGroup(
@@ -219,11 +237,22 @@ public class WebsiteSettingServiceImplementation
                 administrator
         );
 
-        return saveWebsiteSetting(
-                existingSetting,
-                "Another website setting already uses this group "
-                        + "and key."
+        WebsiteSetting savedSetting =
+                saveWebsiteSetting(
+                        existingSetting,
+                        "Another website setting already uses this group "
+                                + "and key."
+                );
+
+        recordSettingAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSetting,
+                beforeSnapshot,
+                "Website setting updated."
         );
+
+        return savedSetting;
     }
 
     @Override
@@ -296,12 +325,26 @@ public class WebsiteSettingServiceImplementation
                             .updatedByAdminUser(administrator)
                             .build();
 
-            return saveWebsiteSetting(
-                    newSetting,
-                    "The website setting could not be created because "
-                            + "the group and key are already in use."
+            WebsiteSetting savedSetting =
+                    saveWebsiteSetting(
+                            newSetting,
+                            "The website setting could not be created because "
+                                    + "the group and key are already in use."
+                    );
+
+            recordSettingAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.CREATE,
+                    savedSetting,
+                    null,
+                    "Website setting created through upsert."
             );
+
+            return savedSetting;
         }
+
+        JsonNode beforeSnapshot =
+                createSettingSnapshot(existingSetting);
 
         existingSetting.updateDetails(
                 normalizedGroup,
@@ -317,10 +360,21 @@ public class WebsiteSettingServiceImplementation
                 administrator
         );
 
-        return saveWebsiteSetting(
-                existingSetting,
-                "The website setting could not be updated."
+        WebsiteSetting savedSetting =
+                saveWebsiteSetting(
+                        existingSetting,
+                        "The website setting could not be updated."
+                );
+
+        recordSettingAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSetting,
+                beforeSnapshot,
+                "Website setting updated through upsert."
         );
+
+        return savedSetting;
     }
 
     @Override
@@ -340,14 +394,28 @@ public class WebsiteSettingServiceImplementation
                         websiteSettingId
                 );
 
+        JsonNode beforeSnapshot =
+                createSettingSnapshot(websiteSetting);
+
         websiteSetting.updateValue(
                 settingValue,
                 administrator
         );
 
-        return websiteSettingRepository.save(
-                websiteSetting
+        WebsiteSetting savedSetting =
+                websiteSettingRepository.save(
+                        websiteSetting
+                );
+
+        recordSettingAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSetting,
+                beforeSnapshot,
+                "Website setting value updated."
         );
+
+        return savedSetting;
     }
 
     @Override
@@ -366,15 +434,29 @@ public class WebsiteSettingServiceImplementation
                         websiteSettingId
                 );
 
+        JsonNode beforeSnapshot =
+                createSettingSnapshot(websiteSetting);
+
         websiteSetting.updateVisibility(
                 isPublic,
                 isSensitive,
                 administrator
         );
 
-        return websiteSettingRepository.save(
-                websiteSetting
+        WebsiteSetting savedSetting =
+                websiteSettingRepository.save(
+                        websiteSetting
+                );
+
+        recordSettingAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSetting,
+                beforeSnapshot,
+                "Website setting visibility updated."
         );
+
+        return savedSetting;
     }
 
     @Override
@@ -502,8 +584,31 @@ public class WebsiteSettingServiceImplementation
                         websiteSettingId
                 );
 
+        JsonNode beforeSnapshot =
+                createSettingSnapshot(websiteSetting);
+
+        UUID resourceId =
+                websiteSetting.getWebsiteSettingId();
+
+        String resourceName =
+                createSettingResourceName(websiteSetting);
+
         websiteSettingRepository.delete(
                 websiteSetting
+        );
+
+        websiteSettingRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.WEBSITE_SETTING,
+                resourceId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Website setting permanently deleted.",
+                null
         );
     }
 
@@ -517,6 +622,96 @@ public class WebsiteSettingServiceImplementation
     public long countSensitiveWebsiteSettings() {
         return websiteSettingRepository
                 .countByIsSensitiveTrue();
+    }
+
+    private void recordSettingAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteSetting websiteSetting,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.WEBSITE_SETTING,
+                websiteSetting.getWebsiteSettingId(),
+                createSettingResourceName(websiteSetting),
+                beforeSnapshot,
+                createSettingSnapshot(websiteSetting),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createSettingSnapshot(
+            WebsiteSetting setting
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "websiteSettingId",
+                setting.getWebsiteSettingId()
+        );
+
+        fields.put(
+                "settingGroup",
+                setting.getSettingGroup()
+        );
+
+        fields.put(
+                "settingKey",
+                setting.getSettingKey()
+        );
+
+        fields.put(
+                "description",
+                setting.getDescription()
+        );
+
+        fields.put(
+                "isPublic",
+                setting.getIsPublic()
+        );
+
+        fields.put(
+                "isSensitive",
+                setting.getIsSensitive()
+        );
+
+        fields.put(
+                "settingValue",
+                Boolean.TRUE.equals(setting.getIsSensitive())
+                        ? null
+                        : setting.getSettingValue()
+        );
+
+        fields.put(
+                "settingValueRedacted",
+                Boolean.TRUE.equals(setting.getIsSensitive())
+        );
+
+        fields.put(
+                "createdAt",
+                setting.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                setting.getUpdatedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createSettingResourceName(
+            WebsiteSetting setting
+    ) {
+        return setting.getSettingGroup()
+                + "."
+                + setting.getSettingKey();
     }
 
     private WebsiteSetting getWebsiteSettingForUpdate(

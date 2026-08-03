@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -10,13 +11,19 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsitePage;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsitePageType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsitePageRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsitePageService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -25,14 +32,39 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Implements production business rules for stable website pages.
+ * Implements production business rules for stable website-page
+ * identities.
  *
- * Version validation:
- * The supplied schema contains draft_version_id and
- * published_version_id but does not yet provide the page-version table
- * or foreign keys. This implementation stores the UUID pointers.
- * Ownership and lifecycle validation will be connected when the
- * page-version entity is provided.
+ * Responsibilities:
+ * - Creates and updates stable website pages.
+ * - Normalizes page keys and route paths.
+ * - Enforces unique page keys and routes.
+ * - Controls active and inactive page status.
+ * - Controls draft and published version pointers.
+ * - Supports soft deletion and restoration.
+ * - Protects system pages from deletion.
+ * - Retrieves administrator and public website pages.
+ * - Attributes write operations to administrators.
+ * - Records immutable content audit entries for every mutation.
+ *
+ * Version lifecycle:
+ * Page-version content creation, editing, publication, archival, and
+ * permanent draft deletion are managed by
+ * WebsitePageVersionServiceImplementation.
+ *
+ * Audit behavior:
+ * - Page creation uses CREATE.
+ * - Page metadata changes use UPDATE.
+ * - Draft-pointer assignment uses SAVE_DRAFT.
+ * - Published-pointer assignment uses PUBLISH.
+ * - Published-pointer removal uses UNPUBLISH.
+ * - Activation and deactivation use UPDATE.
+ * - Soft deletion uses DELETE.
+ * - Restoration uses RESTORE.
+ *
+ * Transaction behavior:
+ * Each page mutation and its corresponding audit entry occur in the
+ * same transaction.
  * ================================================================
  */
 @Service
@@ -41,8 +73,17 @@ import java.util.UUID;
 public class WebsitePageServiceImplementation
         implements WebsitePageService {
 
-    private final WebsitePageRepository websitePageRepository;
-    private final AdminUserRepository adminUserRepository;
+    private final WebsitePageRepository
+            websitePageRepository;
+
+    private final AdminUserRepository
+            adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -60,20 +101,30 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         String pageKey =
-                normalizePageKey(websitePage.getPageKey());
+                normalizePageKey(
+                        websitePage.getPageKey()
+                );
 
         String routePath =
-                normalizeRoutePath(websitePage.getRoutePath());
+                normalizeRoutePath(
+                        websitePage.getRoutePath()
+                );
 
         validatePageFields(websitePage);
 
-        if (websitePageRepository.existsByPageKey(pageKey)) {
+        if (
+                websitePageRepository
+                        .existsByPageKey(pageKey)
+        ) {
             throw conflict(
                     "A website page already uses this page key."
             );
         }
 
-        if (websitePageRepository.existsByRoutePath(routePath)) {
+        if (
+                websitePageRepository
+                        .existsByRoutePath(routePath)
+        ) {
             throw conflict(
                     "A website page already uses this route path."
             );
@@ -119,11 +170,22 @@ public class WebsitePageServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveWebsitePage(
-                pageToCreate,
-                "Unable to create the website page because its key or "
-                        + "route is already in use."
+        WebsitePage savedPage =
+                saveWebsitePage(
+                        pageToCreate,
+                        "Unable to create the website page because its "
+                                + "key or route is already in use."
+                );
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedPage,
+                null,
+                "Website page created."
         );
+
+        return savedPage;
     }
 
     @Override
@@ -133,6 +195,11 @@ public class WebsitePageServiceImplementation
             WebsitePage requestedUpdate,
             UUID administratorId
     ) {
+        requireIdentifier(
+                websitePageId,
+                "Website page ID"
+        );
+
         if (requestedUpdate == null) {
             throw badRequest(
                     "Updated website page information is required."
@@ -143,10 +210,17 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage existingPage =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(existingPage);
 
         String pageKey =
-                normalizePageKey(requestedUpdate.getPageKey());
+                normalizePageKey(
+                        requestedUpdate.getPageKey()
+                );
 
         String routePath =
                 normalizeRoutePath(
@@ -193,11 +267,22 @@ public class WebsitePageServiceImplementation
                 administrator
         );
 
-        return saveWebsitePage(
-                existingPage,
-                "Unable to update the website page because its key or "
-                        + "route is already in use."
+        WebsitePage savedPage =
+                saveWebsitePage(
+                        existingPage,
+                        "Unable to update the website page because its "
+                                + "key or route is already in use."
+                );
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedPage,
+                beforeSnapshot,
+                "Website page details updated."
         );
+
+        return savedPage;
     }
 
     @Override
@@ -291,14 +376,34 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        ensurePageNotDeleted(page);
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
 
         page.assignDraftVersion(
                 pageVersionId,
                 administrator
         );
 
-        return websitePageRepository.save(page);
+        WebsitePage savedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedPage,
+                beforeSnapshot,
+                "Assigned draft version "
+                        + pageVersionId
+                        + " to website page."
+        );
+
+        return savedPage;
     }
 
     @Override
@@ -311,11 +416,38 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        ensurePageNotDeleted(page);
+
+        if (page.getDraftVersionId() == null) {
+            return page;
+        }
+
+        UUID previousDraftVersionId =
+                page.getDraftVersionId();
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
 
         page.clearDraftVersion(administrator);
 
-        return websitePageRepository.save(page);
+        WebsitePage savedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedPage,
+                beforeSnapshot,
+                "Cleared draft version "
+                        + previousDraftVersionId
+                        + " from website page."
+        );
+
+        return savedPage;
     }
 
     @Override
@@ -334,14 +466,34 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        ensurePageNotDeleted(page);
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
 
         page.assignPublishedVersion(
                 pageVersionId,
                 administrator
         );
 
-        return websitePageRepository.save(page);
+        WebsitePage savedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.PUBLISH,
+                savedPage,
+                beforeSnapshot,
+                "Assigned published version "
+                        + pageVersionId
+                        + " to website page."
+        );
+
+        return savedPage;
     }
 
     @Override
@@ -354,11 +506,38 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        ensurePageNotDeleted(page);
+
+        if (page.getPublishedVersionId() == null) {
+            return page;
+        }
+
+        UUID previousPublishedVersionId =
+                page.getPublishedVersionId();
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
 
         page.clearPublishedVersion(administrator);
 
-        return websitePageRepository.save(page);
+        WebsitePage savedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.UNPUBLISH,
+                savedPage,
+                beforeSnapshot,
+                "Cleared published version "
+                        + previousPublishedVersionId
+                        + " from website page."
+        );
+
+        return savedPage;
     }
 
     @Override
@@ -372,7 +551,21 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
+
+        ensurePageNotDeleted(page);
+
+        if (
+                Boolean.TRUE.equals(page.getIsActive())
+                        == isActive
+        ) {
+            return page;
+        }
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
 
         if (isActive) {
             page.activate(administrator);
@@ -380,7 +573,20 @@ public class WebsitePageServiceImplementation
             page.deactivate(administrator);
         }
 
-        return websitePageRepository.save(page);
+        WebsitePage savedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedPage,
+                beforeSnapshot,
+                isActive
+                        ? "Website page activated."
+                        : "Website page deactivated."
+        );
+
+        return savedPage;
     }
 
     @Override
@@ -419,7 +625,9 @@ public class WebsitePageServiceImplementation
                 getRequiredAdministrator(administratorId);
 
         WebsitePage page =
-                getWebsitePageForUpdate(websitePageId);
+                getWebsitePageForUpdate(
+                        websitePageId
+                );
 
         if (Boolean.TRUE.equals(page.getIsSystemPage())) {
             throw conflict(
@@ -428,9 +636,27 @@ public class WebsitePageServiceImplementation
             );
         }
 
+        if (page.isDeleted()) {
+            throw conflict(
+                    "The website page is already deleted."
+            );
+        }
+
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
+
         page.softDelete(administrator);
 
-        websitePageRepository.save(page);
+        WebsitePage deletedPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                deletedPage,
+                beforeSnapshot,
+                "Website page soft deleted."
+        );
     }
 
     @Override
@@ -453,14 +679,29 @@ public class WebsitePageServiceImplementation
             );
         }
 
+        JsonNode beforeSnapshot =
+                createPageSnapshot(page);
+
         page.restore(administrator);
 
         /*
-         * Restoration does not automatically publish or activate a page.
+         * Restoration does not automatically activate or publish the
+         * page. An administrator must explicitly review and activate it.
          */
         page.setIsActive(false);
 
-        return websitePageRepository.save(page);
+        WebsitePage restoredPage =
+                websitePageRepository.saveAndFlush(page);
+
+        recordPageAudit(
+                administratorId,
+                WebsiteContentAuditAction.RESTORE,
+                restoredPage,
+                beforeSnapshot,
+                "Website page restored. The restored page remains inactive."
+        );
+
+        return restoredPage;
     }
 
     @Override
@@ -507,6 +748,106 @@ public class WebsitePageServiceImplementation
                 .countByDeletedAtIsNotNull();
     }
 
+    private void recordPageAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsitePage page,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.WEBSITE_PAGE,
+                page.getWebsitePageId(),
+                page.getPageName(),
+                beforeSnapshot,
+                createPageSnapshot(page),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createPageSnapshot(
+            WebsitePage page
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "websitePageId",
+                page.getWebsitePageId()
+        );
+
+        fields.put(
+                "pageKey",
+                page.getPageKey()
+        );
+
+        fields.put(
+                "pageName",
+                page.getPageName()
+        );
+
+        fields.put(
+                "routePath",
+                page.getRoutePath()
+        );
+
+        fields.put(
+                "pageType",
+                page.getPageType()
+        );
+
+        fields.put(
+                "draftVersionId",
+                page.getDraftVersionId()
+        );
+
+        fields.put(
+                "publishedVersionId",
+                page.getPublishedVersionId()
+        );
+
+        fields.put(
+                "contentSchemaVersion",
+                page.getContentSchemaVersion()
+        );
+
+        fields.put(
+                "isSystemPage",
+                page.getIsSystemPage()
+        );
+
+        fields.put(
+                "isActive",
+                page.getIsActive()
+        );
+
+        fields.put(
+                "deleted",
+                page.isDeleted()
+        );
+
+        fields.put(
+                "deletedAt",
+                page.getDeletedAt()
+        );
+
+        fields.put(
+                "createdAt",
+                page.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                page.getUpdatedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
     private WebsitePage getWebsitePageForUpdate(
             UUID websitePageId
     ) {
@@ -539,41 +880,71 @@ public class WebsitePageServiceImplementation
                 ));
     }
 
+    private void ensurePageNotDeleted(
+            WebsitePage page
+    ) {
+        if (page == null || page.isDeleted()) {
+            throw conflict(
+                    "A deleted website page cannot be modified."
+            );
+        }
+    }
+
     private void validatePageFields(
             WebsitePage page
     ) {
         if (isBlank(page.getPageKey())) {
-            throw badRequest("Page key is required.");
+            throw badRequest(
+                    "Page key is required."
+            );
         }
 
-        if (page.getPageKey().trim().length() > 120) {
+        if (
+                page.getPageKey()
+                        .trim()
+                        .length() > 120
+        ) {
             throw badRequest(
                     "Page key must not exceed 120 characters."
             );
         }
 
         if (isBlank(page.getPageName())) {
-            throw badRequest("Page name is required.");
+            throw badRequest(
+                    "Page name is required."
+            );
         }
 
-        if (page.getPageName().trim().length() > 180) {
+        if (
+                page.getPageName()
+                        .trim()
+                        .length() > 180
+        ) {
             throw badRequest(
                     "Page name must not exceed 180 characters."
             );
         }
 
         if (isBlank(page.getRoutePath())) {
-            throw badRequest("Route path is required.");
+            throw badRequest(
+                    "Route path is required."
+            );
         }
 
-        if (page.getRoutePath().trim().length() > 500) {
+        if (
+                page.getRoutePath()
+                        .trim()
+                        .length() > 500
+        ) {
             throw badRequest(
                     "Route path must not exceed 500 characters."
             );
         }
 
         if (page.getPageType() == null) {
-            throw badRequest("Page type is required.");
+            throw badRequest(
+                    "Page type is required."
+            );
         }
 
         if (
@@ -602,13 +973,24 @@ public class WebsitePageServiceImplementation
             String value
     ) {
         String normalized =
-                normalizeRequired(value, "Page key")
+                normalizeRequired(
+                        value,
+                        "Page key"
+                )
                         .toUpperCase(Locale.ROOT)
-                        .replaceAll("[^A-Z0-9]+", "_")
-                        .replaceAll("^_+|_+$", "");
+                        .replaceAll(
+                                "[^A-Z0-9]+",
+                                "_"
+                        )
+                        .replaceAll(
+                                "^_+|_+$",
+                                ""
+                        );
 
         if (normalized.isBlank()) {
-            throw badRequest("Page key is required.");
+            throw badRequest(
+                    "Page key is required."
+            );
         }
 
         if (normalized.length() > 120) {
@@ -624,22 +1006,31 @@ public class WebsitePageServiceImplementation
             String value
     ) {
         String normalized =
-                normalizeRequired(value, "Route path");
+                normalizeRequired(
+                        value,
+                        "Route path"
+                );
 
         if (!normalized.startsWith("/")) {
-            normalized = "/" + normalized;
+            normalized =
+                    "/" + normalized;
         }
 
-        normalized = normalized.replaceAll("/{2,}", "/");
+        normalized =
+                normalized.replaceAll(
+                        "/{2,}",
+                        "/"
+                );
 
         if (
                 normalized.length() > 1
                         && normalized.endsWith("/")
         ) {
-            normalized = normalized.substring(
-                    0,
-                    normalized.length() - 1
-            );
+            normalized =
+                    normalized.substring(
+                            0,
+                            normalized.length() - 1
+                    );
         }
 
         if (normalized.length() > 500) {
@@ -659,7 +1050,8 @@ public class WebsitePageServiceImplementation
                 "Administrator ID"
         );
 
-        return adminUserRepository.findById(administratorId)
+        return adminUserRepository
+                .findById(administratorId)
                 .orElseThrow(() -> notFound(
                         "Administrator account was not found."
                 ));
@@ -670,7 +1062,8 @@ public class WebsitePageServiceImplementation
             String conflictMessage
     ) {
         try {
-            return websitePageRepository.saveAndFlush(page);
+            return websitePageRepository
+                    .saveAndFlush(page);
         } catch (DataIntegrityViolationException exception) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -705,7 +1098,8 @@ public class WebsitePageServiceImplementation
             String value,
             String fieldName
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(value);
 
         if (normalized == null) {
             throw badRequest(
@@ -723,7 +1117,8 @@ public class WebsitePageServiceImplementation
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null
@@ -733,7 +1128,8 @@ public class WebsitePageServiceImplementation
     private boolean isBlank(
             String value
     ) {
-        return value == null || value.trim().isEmpty();
+        return value == null
+                || value.trim().isEmpty();
     }
 
     private ResponseStatusException badRequest(

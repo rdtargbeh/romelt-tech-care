@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -12,6 +13,8 @@ import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteMediaAsset;
 import romelt_techcare.backend.entity.WebsiteService;
 import romelt_techcare.backend.entity.WebsiteServiceVersion;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteMediaAssetStatus;
 import romelt_techcare.backend.enums.WebsiteMediaUsageResourceType;
 import romelt_techcare.backend.enums.WebsiteServiceStatus;
@@ -20,13 +23,17 @@ import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteMediaAssetRepository;
 import romelt_techcare.backend.repository.WebsiteServiceRepository;
 import romelt_techcare.backend.repository.WebsiteServiceVersionRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteMediaUsageService;
 import romelt_techcare.backend.service.WebsiteServiceVersionService;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -45,18 +52,11 @@ import java.util.UUID;
  * 4. Publish the selected draft.
  * 5. Clear the stable service's draft pointer.
  * 6. Assign its published pointer.
+ * 7. Record lifecycle audit entries.
  *
  * Media tracking:
  * Card and hero images are registered in WebsiteMediaUsage using the
  * SERVICE_VERSION resource type.
- *
- * Public behavior:
- * Public queries return only versions that:
- * - belong to active, non-deleted services;
- * - are the service's current published version;
- * - have PUBLISHED status;
- * - are marked public;
- * - are inside their optional effective window.
  * ================================================================
  */
 @Service
@@ -84,6 +84,12 @@ public class WebsiteServiceVersionServiceImplementation
             websiteMediaUsageService;
 
     private final AdminUserRepository adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -233,6 +239,16 @@ public class WebsiteServiceVersionServiceImplementation
 
         synchronizeMediaUsage(savedDraft);
 
+        recordServiceVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                null,
+                "Created website service draft version "
+                        + savedDraft.getVersionNumber()
+                        + "."
+        );
+
         return getServiceVersion(
                 savedDraft.getServiceVersionId()
         );
@@ -375,6 +391,18 @@ public class WebsiteServiceVersionServiceImplementation
 
         synchronizeMediaUsage(savedDraft);
 
+        recordServiceVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                createServiceVersionSnapshot(publishedVersion),
+                "Created website service draft version "
+                        + savedDraft.getVersionNumber()
+                        + " from published version "
+                        + publishedVersion.getVersionNumber()
+                        + "."
+        );
+
         return getServiceVersion(
                 savedDraft.getServiceVersionId()
         );
@@ -414,6 +442,10 @@ public class WebsiteServiceVersionServiceImplementation
                 draft.getWebsiteService();
 
         ensureServiceUsable(service);
+
+        JsonNode beforeSnapshot =
+                createServiceVersionSnapshot(draft);
+
         validateDraftFields(requestedUpdate);
 
         WebsiteMediaAsset cardImage =
@@ -476,6 +508,16 @@ public class WebsiteServiceVersionServiceImplementation
                 );
 
         synchronizeMediaUsage(savedDraft);
+
+        recordServiceVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                beforeSnapshot,
+                "Updated website service draft version "
+                        + savedDraft.getVersionNumber()
+                        + "."
+        );
 
         return getServiceVersion(serviceVersionId);
     }
@@ -607,6 +649,9 @@ public class WebsiteServiceVersionServiceImplementation
             );
         }
 
+        JsonNode draftBeforeSnapshot =
+                createServiceVersionSnapshot(draft);
+
         WebsiteServiceVersion currentPublished =
                 websiteServiceVersionRepository
                         .findByServiceAndStatusForUpdate(
@@ -616,10 +661,26 @@ public class WebsiteServiceVersionServiceImplementation
                         .orElse(null);
 
         if (currentPublished != null) {
+            JsonNode currentPublishedBeforeSnapshot =
+                    createServiceVersionSnapshot(currentPublished);
+
             currentPublished.archive(administrator);
 
-            websiteServiceVersionRepository.saveAndFlush(
-                    currentPublished
+            WebsiteServiceVersion archivedVersion =
+                    websiteServiceVersionRepository.saveAndFlush(
+                            currentPublished
+                    );
+
+            recordServiceVersionAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.ARCHIVE,
+                    archivedVersion,
+                    currentPublishedBeforeSnapshot,
+                    "Archived website service version "
+                            + archivedVersion.getVersionNumber()
+                            + " because version "
+                            + draft.getVersionNumber()
+                            + " was published."
             );
         }
 
@@ -639,6 +700,16 @@ public class WebsiteServiceVersionServiceImplementation
         websiteServiceRepository.saveAndFlush(service);
 
         synchronizeMediaUsage(publishedDraft);
+
+        recordServiceVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.PUBLISH,
+                publishedDraft,
+                draftBeforeSnapshot,
+                "Published website service version "
+                        + publishedDraft.getVersionNumber()
+                        + "."
+        );
 
         return getServiceVersion(
                 publishedDraft.getServiceVersionId()
@@ -667,14 +738,18 @@ public class WebsiteServiceVersionServiceImplementation
             return getServiceVersion(serviceVersionId);
         }
 
+        JsonNode beforeSnapshot =
+                createServiceVersionSnapshot(version);
+
         boolean wasDraft = version.isDraft();
         boolean wasPublished = version.isPublished();
 
         version.archive(administrator);
 
-        websiteServiceVersionRepository.saveAndFlush(
-                version
-        );
+        WebsiteServiceVersion archivedVersion =
+                websiteServiceVersionRepository.saveAndFlush(
+                        version
+                );
 
         if (
                 wasDraft
@@ -696,6 +771,16 @@ public class WebsiteServiceVersionServiceImplementation
 
         websiteServiceRepository.saveAndFlush(service);
 
+        recordServiceVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.ARCHIVE,
+                archivedVersion,
+                beforeSnapshot,
+                "Archived website service version "
+                        + archivedVersion.getVersionNumber()
+                        + "."
+        );
+
         return getServiceVersion(serviceVersionId);
     }
 
@@ -716,6 +801,18 @@ public class WebsiteServiceVersionServiceImplementation
                     "Only a draft service version may be permanently deleted."
             );
         }
+
+        JsonNode beforeSnapshot =
+                createServiceVersionSnapshot(draft);
+
+        UUID resourceId =
+                draft.getServiceVersionId();
+
+        String resourceName =
+                createServiceVersionResourceName(draft);
+
+        int versionNumber =
+                draft.getVersionNumber();
 
         WebsiteService service =
                 getServiceForUpdate(
@@ -741,6 +838,20 @@ public class WebsiteServiceVersionServiceImplementation
 
         websiteServiceVersionRepository.delete(draft);
         websiteServiceVersionRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.SERVICE_VERSION,
+                resourceId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Permanently deleted website service draft version "
+                        + versionNumber
+                        + ".",
+                null
+        );
     }
 
     @Override
@@ -793,6 +904,193 @@ public class WebsiteServiceVersionServiceImplementation
                 .findAllBookablePublicServices(
                         Instant.now()
                 );
+    }
+
+    private void recordServiceVersionAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteServiceVersion version,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.SERVICE_VERSION,
+                version.getServiceVersionId(),
+                createServiceVersionResourceName(version),
+                beforeSnapshot,
+                createServiceVersionSnapshot(version),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createServiceVersionSnapshot(
+            WebsiteServiceVersion version
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "serviceVersionId",
+                version.getServiceVersionId()
+        );
+
+        fields.put(
+                "serviceId",
+                version.getWebsiteService() == null
+                        ? null
+                        : version.getWebsiteService()
+                        .getServiceId()
+        );
+
+        fields.put(
+                "serviceCode",
+                version.getWebsiteService() == null
+                        ? null
+                        : version.getWebsiteService()
+                        .getServiceCode()
+        );
+
+        fields.put(
+                "versionNumber",
+                version.getVersionNumber()
+        );
+
+        fields.put(
+                "versionStatus",
+                version.getVersionStatus()
+        );
+
+        fields.put(
+                "serviceName",
+                version.getServiceName()
+        );
+
+        fields.put(
+                "shortDescription",
+                version.getShortDescription()
+        );
+
+        fields.put(
+                "fullDescription",
+                version.getFullDescription()
+        );
+
+        fields.put(
+                "iconKey",
+                version.getIconKey()
+        );
+
+        fields.put(
+                "cardImageMediaId",
+                version.getCardImageMedia() == null
+                        ? null
+                        : version.getCardImageMedia()
+                        .getMediaAssetId()
+        );
+
+        fields.put(
+                "heroImageMediaId",
+                version.getHeroImageMedia() == null
+                        ? null
+                        : version.getHeroImageMedia()
+                        .getMediaAssetId()
+        );
+
+        fields.put(
+                "startingPrice",
+                version.getStartingPrice()
+        );
+
+        fields.put(
+                "currencyCode",
+                version.getCurrencyCode()
+        );
+
+        fields.put(
+                "priceUnitLabel",
+                version.getPriceUnitLabel()
+        );
+
+        fields.put(
+                "displayOrder",
+                version.getDisplayOrder()
+        );
+
+        fields.put(
+                "isFeatured",
+                version.getIsFeatured()
+        );
+
+        fields.put(
+                "isBookable",
+                version.getIsBookable()
+        );
+
+        fields.put(
+                "isPublic",
+                version.getIsPublic()
+        );
+
+        fields.put(
+                "seoTitle",
+                version.getSeoTitle()
+        );
+
+        fields.put(
+                "seoDescription",
+                version.getSeoDescription()
+        );
+
+        fields.put(
+                "effectiveFrom",
+                version.getEffectiveFrom()
+        );
+
+        fields.put(
+                "effectiveUntil",
+                version.getEffectiveUntil()
+        );
+
+        fields.put(
+                "changeSummary",
+                version.getChangeSummary()
+        );
+
+        fields.put(
+                "publishedAt",
+                version.getPublishedAt()
+        );
+
+        fields.put(
+                "archivedAt",
+                version.getArchivedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createServiceVersionResourceName(
+            WebsiteServiceVersion version
+    ) {
+        String serviceCode =
+                version.getWebsiteService() == null
+                        ? null
+                        : normalizeOptional(
+                        version.getWebsiteService()
+                                .getServiceCode()
+                );
+
+        if (serviceCode == null) {
+            serviceCode = "WEBSITE_SERVICE";
+        }
+
+        return serviceCode
+                + " - Version "
+                + version.getVersionNumber();
     }
 
     private WebsiteServiceVersion getVersionForUpdate(

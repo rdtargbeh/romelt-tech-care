@@ -13,6 +13,8 @@ import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteMediaAsset;
 import romelt_techcare.backend.entity.WebsitePage;
 import romelt_techcare.backend.entity.WebsitePageVersion;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteMediaAssetStatus;
 import romelt_techcare.backend.enums.WebsiteMediaUsageResourceType;
 import romelt_techcare.backend.enums.WebsitePageVersionStatus;
@@ -20,12 +22,16 @@ import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteMediaAssetRepository;
 import romelt_techcare.backend.repository.WebsitePageRepository;
 import romelt_techcare.backend.repository.WebsitePageVersionRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteMediaUsageService;
 import romelt_techcare.backend.service.WebsitePageVersionService;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -34,23 +40,31 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Implements production draft, publication, archive, history, and
- * public-content rules for versioned website pages.
+ * Implements production draft, publication, archive, history, public
+ * content, media-reference, and audit rules for website page
+ * versions.
  *
  * Publication transaction:
- * 1. Lock the owning page.
- * 2. Lock the requested draft.
- * 3. Archive the currently published version, when present.
- * 4. Publish the requested draft.
- * 5. Clear the page's draft pointer.
- * 6. Assign the page's published pointer.
+ * 1. Locks the owning page.
+ * 2. Locks the requested draft.
+ * 3. Archives the currently published version, when present.
+ * 4. Publishes the requested draft.
+ * 5. Clears the page's draft pointer.
+ * 6. Assigns the page's published pointer.
+ * 7. Synchronizes the social-image media usage.
+ * 8. Records all version lifecycle changes in the audit log.
  *
- * Media tracking:
- * The explicit socialImageMedia relationship is tracked through
- * WebsiteMediaUsage. Media identifiers embedded inside contentJson are
- * not inferred because their meaning depends on each page's content
- * schema. Page-specific content services or validators must register
- * those structured media references explicitly.
+ * Audit behavior:
+ * - Draft creation and updates use SAVE_DRAFT.
+ * - Publication uses PUBLISH.
+ * - Replaced published versions use ARCHIVE.
+ * - Manual archival uses ARCHIVE.
+ * - Permanent draft removal uses DELETE.
+ *
+ * Audit snapshot rule:
+ * contentJson is stored because it is the actual administrator-managed
+ * page content. Authentication data, storage credentials, and other
+ * secrets must never be placed inside page content JSON.
  * ================================================================
  */
 @Service
@@ -74,7 +88,14 @@ public class WebsitePageVersionServiceImplementation
     private final WebsiteMediaUsageService
             websiteMediaUsageService;
 
-    private final AdminUserRepository adminUserRepository;
+    private final AdminUserRepository
+            adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -202,6 +223,16 @@ public class WebsitePageVersionServiceImplementation
 
         synchronizeSocialImageUsage(savedDraft);
 
+        recordPageVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                null,
+                "Created website page draft version "
+                        + savedDraft.getVersionNumber()
+                        + "."
+        );
+
         return getPageVersion(
                 savedDraft.getPageVersionId()
         );
@@ -217,6 +248,12 @@ public class WebsitePageVersionServiceImplementation
         requireIdentifier(
                 websitePageId,
                 "Website page ID"
+        );
+
+        validateLength(
+                changeSummary,
+                1000,
+                "Change summary"
         );
 
         AdminUser administrator =
@@ -314,6 +351,18 @@ public class WebsitePageVersionServiceImplementation
 
         synchronizeSocialImageUsage(savedDraft);
 
+        recordPageVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                createPageVersionSnapshot(publishedVersion),
+                "Created website page draft version "
+                        + savedDraft.getVersionNumber()
+                        + " from published version "
+                        + publishedVersion.getVersionNumber()
+                        + "."
+        );
+
         return getPageVersion(
                 savedDraft.getPageVersionId()
         );
@@ -349,9 +398,24 @@ public class WebsitePageVersionServiceImplementation
             );
         }
 
-        WebsitePage page = draft.getWebsitePage();
+        WebsitePage page =
+                draft.getWebsitePage();
 
         ensurePageUsable(page);
+
+        if (
+                page.getDraftVersionId() == null
+                        || !pageVersionId.equals(
+                        page.getDraftVersionId()
+                )
+        ) {
+            throw conflict(
+                    "The selected version is not the page's current draft."
+            );
+        }
+
+        JsonNode beforeSnapshot =
+                createPageVersionSnapshot(draft);
 
         validateDraftFields(
                 requestedUpdate,
@@ -399,6 +463,16 @@ public class WebsitePageVersionServiceImplementation
                 );
 
         synchronizeSocialImageUsage(savedDraft);
+
+        recordPageVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.SAVE_DRAFT,
+                savedDraft,
+                beforeSnapshot,
+                "Updated website page draft version "
+                        + savedDraft.getVersionNumber()
+                        + "."
+        );
 
         return getPageVersion(pageVersionId);
     }
@@ -519,7 +593,8 @@ public class WebsitePageVersionServiceImplementation
         ensurePageUsable(page);
 
         if (
-                !pageVersionId.equals(
+                page.getDraftVersionId() == null
+                        || !pageVersionId.equals(
                         page.getDraftVersionId()
                 )
         ) {
@@ -527,6 +602,11 @@ public class WebsitePageVersionServiceImplementation
                     "The selected version is not the page's current draft."
             );
         }
+
+        validateDraftFields(draft, page);
+
+        JsonNode draftBeforeSnapshot =
+                createPageVersionSnapshot(draft);
 
         WebsitePageVersion currentPublished =
                 websitePageVersionRepository
@@ -537,10 +617,27 @@ public class WebsitePageVersionServiceImplementation
                         .orElse(null);
 
         if (currentPublished != null) {
+            JsonNode publishedBeforeSnapshot =
+                    createPageVersionSnapshot(
+                            currentPublished
+                    );
+
             currentPublished.archive(administrator);
 
-            websitePageVersionRepository.saveAndFlush(
-                    currentPublished
+            WebsitePageVersion archivedVersion =
+                    websitePageVersionRepository
+                            .saveAndFlush(currentPublished);
+
+            recordPageVersionAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.ARCHIVE,
+                    archivedVersion,
+                    publishedBeforeSnapshot,
+                    "Archived website page version "
+                            + archivedVersion.getVersionNumber()
+                            + " because version "
+                            + draft.getVersionNumber()
+                            + " was published."
             );
         }
 
@@ -560,6 +657,16 @@ public class WebsitePageVersionServiceImplementation
         websitePageRepository.saveAndFlush(page);
 
         synchronizeSocialImageUsage(publishedDraft);
+
+        recordPageVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.PUBLISH,
+                publishedDraft,
+                draftBeforeSnapshot,
+                "Published website page version "
+                        + publishedDraft.getVersionNumber()
+                        + "."
+        );
 
         return getPageVersion(
                 publishedDraft.getPageVersionId()
@@ -588,14 +695,20 @@ public class WebsitePageVersionServiceImplementation
             return getPageVersion(pageVersionId);
         }
 
-        boolean wasDraft = version.isDraft();
-        boolean wasPublished = version.isPublished();
+        JsonNode beforeSnapshot =
+                createPageVersionSnapshot(version);
+
+        boolean wasDraft =
+                version.isDraft();
+
+        boolean wasPublished =
+                version.isPublished();
 
         version.archive(administrator);
 
-        websitePageVersionRepository.saveAndFlush(
-                version
-        );
+        WebsitePageVersion archivedVersion =
+                websitePageVersionRepository
+                        .saveAndFlush(version);
 
         if (
                 wasDraft
@@ -617,6 +730,16 @@ public class WebsitePageVersionServiceImplementation
 
         websitePageRepository.saveAndFlush(page);
 
+        recordPageVersionAudit(
+                administratorId,
+                WebsiteContentAuditAction.ARCHIVE,
+                archivedVersion,
+                beforeSnapshot,
+                "Archived website page version "
+                        + archivedVersion.getVersionNumber()
+                        + "."
+        );
+
         return getPageVersion(pageVersionId);
     }
 
@@ -626,7 +749,8 @@ public class WebsitePageVersionServiceImplementation
             UUID pageVersionId,
             UUID administratorId
     ) {
-        getRequiredAdministrator(administratorId);
+        AdminUser administrator =
+                getRequiredAdministrator(administratorId);
 
         WebsitePageVersion draft =
                 getVersionForUpdate(pageVersionId);
@@ -636,6 +760,18 @@ public class WebsitePageVersionServiceImplementation
                     "Only a draft page version may be permanently deleted."
             );
         }
+
+        JsonNode beforeSnapshot =
+                createPageVersionSnapshot(draft);
+
+        UUID deletedVersionId =
+                draft.getPageVersionId();
+
+        int deletedVersionNumber =
+                draft.getVersionNumber();
+
+        String resourceName =
+                createPageVersionResourceName(draft);
 
         WebsitePage page =
                 getPageForUpdate(
@@ -655,17 +791,27 @@ public class WebsitePageVersionServiceImplementation
                         page.getDraftVersionId()
                 )
         ) {
-            page.clearDraftVersion(
-                    getRequiredAdministrator(
-                            administratorId
-                    )
-            );
-
+            page.clearDraftVersion(administrator);
             websitePageRepository.saveAndFlush(page);
         }
 
         websitePageVersionRepository.delete(draft);
         websitePageVersionRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType
+                        .WEBSITE_PAGE_VERSION,
+                deletedVersionId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Permanently deleted website page draft version "
+                        + deletedVersionNumber
+                        + ".",
+                null
+        );
     }
 
     @Override
@@ -692,6 +838,158 @@ public class WebsitePageVersionServiceImplementation
                 .orElseThrow(() -> notFound(
                         "Public website page was not found."
                 ));
+    }
+
+    private void recordPageVersionAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsitePageVersion version,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType
+                        .WEBSITE_PAGE_VERSION,
+                version.getPageVersionId(),
+                createPageVersionResourceName(version),
+                beforeSnapshot,
+                createPageVersionSnapshot(version),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createPageVersionSnapshot(
+            WebsitePageVersion version
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "pageVersionId",
+                version.getPageVersionId()
+        );
+
+        fields.put(
+                "websitePageId",
+                version.getWebsitePage() == null
+                        ? null
+                        : version.getWebsitePage()
+                        .getWebsitePageId()
+        );
+
+        fields.put(
+                "pageKey",
+                version.getWebsitePage() == null
+                        ? null
+                        : version.getWebsitePage()
+                        .getPageKey()
+        );
+
+        fields.put(
+                "versionNumber",
+                version.getVersionNumber()
+        );
+
+        fields.put(
+                "versionStatus",
+                version.getVersionStatus()
+        );
+
+        fields.put(
+                "contentSchemaVersion",
+                version.getContentSchemaVersion()
+        );
+
+        fields.put(
+                "contentJson",
+                version.getContentJson() == null
+                        ? null
+                        : version.getContentJson().deepCopy()
+        );
+
+        fields.put(
+                "seoTitle",
+                version.getSeoTitle()
+        );
+
+        fields.put(
+                "seoDescription",
+                version.getSeoDescription()
+        );
+
+        fields.put(
+                "socialTitle",
+                version.getSocialTitle()
+        );
+
+        fields.put(
+                "socialDescription",
+                version.getSocialDescription()
+        );
+
+        fields.put(
+                "socialImageMediaId",
+                version.getSocialImageMedia() == null
+                        ? null
+                        : version.getSocialImageMedia()
+                        .getMediaAssetId()
+        );
+
+        fields.put(
+                "canonicalUrl",
+                version.getCanonicalUrl()
+        );
+
+        fields.put(
+                "robotsIndex",
+                version.getRobotsIndex()
+        );
+
+        fields.put(
+                "robotsFollow",
+                version.getRobotsFollow()
+        );
+
+        fields.put(
+                "changeSummary",
+                version.getChangeSummary()
+        );
+
+        fields.put(
+                "publishedAt",
+                version.getPublishedAt()
+        );
+
+        fields.put(
+                "archivedAt",
+                version.getArchivedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createPageVersionResourceName(
+            WebsitePageVersion version
+    ) {
+        String pageKey =
+                version.getWebsitePage() == null
+                        ? null
+                        : normalizeOptional(
+                        version.getWebsitePage()
+                                .getPageKey()
+                );
+
+        if (pageKey == null) {
+            pageKey = "WEBSITE_PAGE";
+        }
+
+        return pageKey
+                + " - Version "
+                + version.getVersionNumber();
     }
 
     private WebsitePageVersion getVersionForUpdate(
@@ -774,7 +1072,8 @@ public class WebsitePageVersionServiceImplementation
             );
         }
 
-        JsonNode contentJson = draft.getContentJson();
+        JsonNode contentJson =
+                draft.getContentJson();
 
         if (contentJson == null || !contentJson.isObject()) {
             throw badRequest(
@@ -892,17 +1191,22 @@ public class WebsitePageVersionServiceImplementation
     private String normalizeCanonicalUrl(
             String value
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(value);
 
         if (normalized == null) {
             return null;
         }
 
         try {
-            URI uri = new URI(normalized);
+            URI uri =
+                    new URI(normalized);
 
-            String scheme = uri.getScheme();
-            String host = uri.getHost();
+            String scheme =
+                    uri.getScheme();
+
+            String host =
+                    uri.getHost();
 
             if (
                     scheme == null
@@ -931,7 +1235,10 @@ public class WebsitePageVersionServiceImplementation
             String value
     ) {
         String normalized =
-                normalizeRequired(value, "Page key")
+                normalizeRequired(
+                        value,
+                        "Page key"
+                )
                         .toUpperCase(Locale.ROOT)
                         .replaceAll("[^A-Z0-9]+", "_")
                         .replaceAll("^_+|_+$", "");
@@ -949,25 +1256,31 @@ public class WebsitePageVersionServiceImplementation
             String value
     ) {
         String normalized =
-                normalizeRequired(value, "Route path");
+                normalizeRequired(
+                        value,
+                        "Route path"
+                );
 
         if (!normalized.startsWith("/")) {
-            normalized = "/" + normalized;
+            normalized =
+                    "/" + normalized;
         }
 
-        normalized = normalized.replaceAll(
-                "/{2,}",
-                "/"
-        );
+        normalized =
+                normalized.replaceAll(
+                        "/{2,}",
+                        "/"
+                );
 
         if (
                 normalized.length() > 1
                         && normalized.endsWith("/")
         ) {
-            normalized = normalized.substring(
-                    0,
-                    normalized.length() - 1
-            );
+            normalized =
+                    normalized.substring(
+                            0,
+                            normalized.length() - 1
+                    );
         }
 
         return normalized;
@@ -1048,7 +1361,8 @@ public class WebsitePageVersionServiceImplementation
             String value,
             String fieldName
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(value);
 
         if (normalized == null) {
             throw badRequest(
@@ -1066,7 +1380,8 @@ public class WebsitePageVersionServiceImplementation
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null

@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -18,17 +19,23 @@ import romelt_techcare.backend.entity.BookingRequest;
 import romelt_techcare.backend.enums.BookingRequestStatus;
 import romelt_techcare.backend.enums.BookingSource;
 import romelt_techcare.backend.enums.ServiceMethod;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.exception.AdminAuthenticationException;
 import romelt_techcare.backend.exception.PublicRequestRejectedException;
 import romelt_techcare.backend.mapper.BookingRequestMapper;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.BookingRequestRepository;
 import romelt_techcare.backend.service.BookingRequestService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
 import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.Year;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -42,11 +49,13 @@ import java.util.UUID;
  * Responsibilities:
  * - Creates public website booking requests.
  * - Creates bookings entered by authenticated administrators.
- * - Applies shared scheduling and service-location rules.
+ * - Applies scheduling and service-location rules.
  * - Generates unique customer-facing reference numbers.
  * - Records booking source and creating administrator.
  * - Retrieves booking list and detail records.
  * - Updates booking lifecycle status.
+ * - Records immutable audit events for booking creation and status
+ *   changes.
  *
  * Booking lifecycle:
  * PENDING → UNDER_REVIEW → CONFIRMED → COMPLETED
@@ -81,6 +90,12 @@ public class BookingRequestServiceImpl
     private final BookingRequestMapper
             bookingRequestMapper;
 
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
+
     private final SecureRandom secureRandom =
             new SecureRandom();
 
@@ -114,9 +129,26 @@ public class BookingRequestServiceImpl
                 );
 
         BookingRequest savedBookingRequest =
-                bookingRequestRepository.save(
+                bookingRequestRepository.saveAndFlush(
                         bookingRequest
                 );
+
+        JsonNode afterSnapshot =
+                createBookingSnapshot(
+                        savedBookingRequest
+                );
+
+        websiteContentAuditLogService.recordAudit(
+                null,
+                WebsiteContentAuditAction.CREATE,
+                WebsiteContentAuditResourceType.BOOKING_REQUEST,
+                savedBookingRequest.getBookingRequestId(),
+                savedBookingRequest.getReferenceNumber(),
+                null,
+                afterSnapshot,
+                "Public booking request submitted.",
+                null
+        );
 
         log.info(
                 "Public booking request created. bookingRequestId={}, referenceNumber={}, source={}, preferredDate={}",
@@ -178,9 +210,26 @@ public class BookingRequestServiceImpl
                 );
 
         BookingRequest savedBookingRequest =
-                bookingRequestRepository.save(
+                bookingRequestRepository.saveAndFlush(
                         bookingRequest
                 );
+
+        JsonNode afterSnapshot =
+                createBookingSnapshot(
+                        savedBookingRequest
+                );
+
+        websiteContentAuditLogService.recordAudit(
+                administrator.getAdminUserId(),
+                WebsiteContentAuditAction.CREATE,
+                WebsiteContentAuditResourceType.BOOKING_REQUEST,
+                savedBookingRequest.getBookingRequestId(),
+                savedBookingRequest.getReferenceNumber(),
+                null,
+                afterSnapshot,
+                "Administrator created a booking request.",
+                null
+        );
 
         log.info(
                 "Administrator booking created. bookingRequestId={}, referenceNumber={}, source={}, createdByAdminUserId={}, preferredDate={}",
@@ -250,6 +299,9 @@ public class BookingRequestServiceImpl
         BookingRequest bookingRequest =
                 findBookingRequest(bookingRequestId);
 
+        JsonNode beforeSnapshot =
+                createBookingSnapshot(bookingRequest);
+
         BookingRequestStatus previousStatus =
                 bookingRequest.getStatus();
 
@@ -266,9 +318,30 @@ public class BookingRequestServiceImpl
         }
 
         BookingRequest savedBookingRequest =
-                bookingRequestRepository.save(
+                bookingRequestRepository.saveAndFlush(
                         bookingRequest
                 );
+
+        JsonNode afterSnapshot =
+                createBookingSnapshot(
+                        savedBookingRequest
+                );
+
+        websiteContentAuditLogService.recordAudit(
+                administrator.getAdminUserId(),
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.BOOKING_REQUEST,
+                savedBookingRequest.getBookingRequestId(),
+                savedBookingRequest.getReferenceNumber(),
+                beforeSnapshot,
+                afterSnapshot,
+                "Booking status changed from "
+                        + previousStatus
+                        + " to "
+                        + savedBookingRequest.getStatus()
+                        + ".",
+                null
+        );
 
         log.info(
                 "Booking status updated. bookingRequestId={}, referenceNumber={}, previousStatus={}, newStatus={}, updatedByAdminUserId={}",
@@ -284,9 +357,51 @@ public class BookingRequestServiceImpl
         );
     }
 
-    /**
-     * Loads one booking or raises a not-found response.
-     */
+    private JsonNode createBookingSnapshot(
+            BookingRequest bookingRequest
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "bookingRequestId",
+                bookingRequest.getBookingRequestId()
+        );
+
+        fields.put(
+                "referenceNumber",
+                bookingRequest.getReferenceNumber()
+        );
+
+        fields.put(
+                "status",
+                bookingRequest.getStatus()
+        );
+
+        fields.put(
+                "bookingSource",
+                bookingRequest.getBookingSource()
+        );
+
+        fields.put(
+                "serviceMethod",
+                bookingRequest.getServiceMethod()
+        );
+
+        fields.put(
+                "preferredDate",
+                bookingRequest.getPreferredDate()
+        );
+
+        fields.put(
+                "alternateDate",
+                bookingRequest.getAlternateDate()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
     private BookingRequest findBookingRequest(
             UUID bookingRequestId
     ) {
@@ -307,9 +422,6 @@ public class BookingRequestServiceImpl
                 );
     }
 
-    /**
-     * Loads and validates the currently authenticated administrator.
-     */
     private AdminUser findAuthenticatedAdministrator(
             AdminJwtPrincipal principal
     ) {
@@ -323,31 +435,34 @@ public class BookingRequestServiceImpl
                                         ::accountNotFound
                         );
 
-        if (administrator.getAdminUserId() == null
-                || !administrator.getAdminUserId()
-                .equals(principal.adminUserId())) {
-
+        if (
+                administrator.getAdminUserId() == null
+                        || !administrator.getAdminUserId()
+                        .equals(principal.adminUserId())
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
 
-        if (administrator.getEmail() == null
-                || principal.email() == null
-                || !administrator.getEmail()
-                .trim()
-                .equalsIgnoreCase(
-                        principal.email().trim()
-                )) {
-
+        if (
+                administrator.getEmail() == null
+                        || principal.email() == null
+                        || !administrator.getEmail()
+                        .trim()
+                        .equalsIgnoreCase(
+                                principal.email().trim()
+                        )
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
 
-        if (administrator.getRole() == null
-                || principal.role() == null
-                || administrator.getRole()
-                != principal.role()) {
-
+        if (
+                administrator.getRole() == null
+                        || principal.role() == null
+                        || administrator.getRole()
+                        != principal.role()
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }
@@ -360,9 +475,6 @@ public class BookingRequestServiceImpl
         return administrator;
     }
 
-    /**
-     * WEBSITE is reserved for the public booking endpoint.
-     */
     private void validateAdminBookingSource(
             BookingSource bookingSource
     ) {
@@ -381,10 +493,6 @@ public class BookingRequestServiceImpl
         }
     }
 
-    /**
-     * Applies business rules shared by public and administrator
-     * bookings.
-     */
     private void validateBusinessRules(
             LocalDate preferredDate,
             LocalDate alternateDate,
@@ -408,9 +516,10 @@ public class BookingRequestServiceImpl
             );
         }
 
-        if (alternateDate != null
-                && alternateDate.equals(preferredDate)) {
-
+        if (
+                alternateDate != null
+                        && alternateDate.equals(preferredDate)
+        ) {
             throw new PublicRequestRejectedException(
                     HttpStatus.BAD_REQUEST,
                     "Alternate date must be different from the preferred date."
@@ -471,11 +580,10 @@ public class BookingRequestServiceImpl
             String referenceNumber =
                     createReferenceNumber();
 
-            if (!bookingRequestRepository
-                    .existsByReferenceNumber(
-                            referenceNumber
-                    )) {
-
+            if (
+                    !bookingRequestRepository
+                            .existsByReferenceNumber(referenceNumber)
+            ) {
                 return referenceNumber;
             }
         }
@@ -579,11 +687,12 @@ public class BookingRequestServiceImpl
     private void requirePrincipal(
             AdminJwtPrincipal principal
     ) {
-        if (principal == null
-                || principal.adminUserId() == null
-                || isBlank(principal.email())
-                || principal.role() == null) {
-
+        if (
+                principal == null
+                        || principal.adminUserId() == null
+                        || isBlank(principal.email())
+                        || principal.role() == null
+        ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
         }

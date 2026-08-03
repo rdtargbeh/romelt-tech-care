@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -9,14 +10,20 @@ import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteBusinessProfile;
 import romelt_techcare.backend.entity.WebsiteMediaAsset;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.enums.WebsiteMediaAssetStatus;
 import romelt_techcare.backend.enums.WebsiteMediaUsageResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteBusinessProfileRepository;
 import romelt_techcare.backend.repository.WebsiteMediaAssetRepository;
 import romelt_techcare.backend.service.WebsiteBusinessProfileService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteMediaUsageService;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -36,11 +43,19 @@ import java.util.UUID;
  *   assigned to the public business profile.
  * - Synchronizes media-usage references transactionally.
  * - Attributes all write operations to an authenticated administrator.
+ * - Records immutable audit events for all profile changes.
  *
  * Publishing behavior:
  * Profile changes are immediately visible through the public endpoint.
- * The future website content audit-log service must record the before
- * and after state of each write operation.
+ *
+ * Audit security:
+ * Audit snapshots intentionally omit:
+ * - public email;
+ * - public phone;
+ * - street address;
+ * - address line 2;
+ * - postal code;
+ * - long business descriptions.
  * ================================================================
  */
 @Service
@@ -49,10 +64,18 @@ import java.util.UUID;
 public class WebsiteBusinessProfileServiceImplementation
         implements WebsiteBusinessProfileService {
 
-    private static final String PRIMARY_LOGO_USAGE = "PRIMARY_LOGO";
-    private static final String LIGHT_LOGO_USAGE = "LIGHT_LOGO";
-    private static final String DARK_LOGO_USAGE = "DARK_LOGO";
-    private static final String FAVICON_USAGE = "FAVICON";
+    private static final String PRIMARY_LOGO_USAGE =
+            "PRIMARY_LOGO";
+
+    private static final String LIGHT_LOGO_USAGE =
+            "LIGHT_LOGO";
+
+    private static final String DARK_LOGO_USAGE =
+            "DARK_LOGO";
+
+    private static final String FAVICON_USAGE =
+            "FAVICON";
+
     private static final String DEFAULT_SOCIAL_IMAGE_USAGE =
             "DEFAULT_SOCIAL_IMAGE";
 
@@ -65,7 +88,14 @@ public class WebsiteBusinessProfileServiceImplementation
     private final WebsiteMediaUsageService
             websiteMediaUsageService;
 
-    private final AdminUserRepository adminUserRepository;
+    private final AdminUserRepository
+            adminUserRepository;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
 
     @Override
     @Transactional
@@ -84,8 +114,13 @@ public class WebsiteBusinessProfileServiceImplementation
 
         validateRequiredFields(businessProfile);
 
-        if (Boolean.TRUE.equals(businessProfile.getIsActive())
-                && websiteBusinessProfileRepository.existsByIsActiveTrue()) {
+        if (
+                Boolean.TRUE.equals(
+                        businessProfile.getIsActive()
+                )
+                        && websiteBusinessProfileRepository
+                        .existsByIsActiveTrue()
+        ) {
             throw conflict(
                     "An active website business profile already exists."
             );
@@ -93,11 +128,15 @@ public class WebsiteBusinessProfileServiceImplementation
 
         WebsiteBusinessProfile profileToCreate =
                 WebsiteBusinessProfile.builder()
-                        .businessName(businessProfile.getBusinessName())
+                        .businessName(
+                                businessProfile.getBusinessName()
+                        )
                         .legalBusinessName(
                                 businessProfile.getLegalBusinessName()
                         )
-                        .tagline(businessProfile.getTagline())
+                        .tagline(
+                                businessProfile.getTagline()
+                        )
                         .secondaryTagline(
                                 businessProfile.getSecondaryTagline()
                         )
@@ -107,15 +146,21 @@ public class WebsiteBusinessProfileServiceImplementation
                         .fullDescription(
                                 businessProfile.getFullDescription()
                         )
-                        .publicEmail(businessProfile.getPublicEmail())
-                        .publicPhone(businessProfile.getPublicPhone())
+                        .publicEmail(
+                                businessProfile.getPublicEmail()
+                        )
+                        .publicPhone(
+                                businessProfile.getPublicPhone()
+                        )
                         .streetAddress(
                                 businessProfile.getStreetAddress()
                         )
                         .addressLine2(
                                 businessProfile.getAddressLine2()
                         )
-                        .city(businessProfile.getCity())
+                        .city(
+                                businessProfile.getCity()
+                        )
                         .stateRegion(
                                 businessProfile.getStateRegion()
                         )
@@ -188,6 +233,18 @@ public class WebsiteBusinessProfileServiceImplementation
 
         synchronizeMediaUsages(savedProfile);
 
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                WebsiteContentAuditResourceType.BUSINESS_PROFILE,
+                savedProfile.getBusinessProfileId(),
+                savedProfile.getBusinessName(),
+                null,
+                createProfileSnapshot(savedProfile),
+                "Website business profile created.",
+                null
+        );
+
         return getBusinessProfile(
                 savedProfile.getBusinessProfileId()
         );
@@ -216,6 +273,9 @@ public class WebsiteBusinessProfileServiceImplementation
 
         WebsiteBusinessProfile existingProfile =
                 getProfileForUpdate(businessProfileId);
+
+        JsonNode beforeSnapshot =
+                createProfileSnapshot(existingProfile);
 
         validateRequiredFields(requestedUpdate);
 
@@ -331,11 +391,13 @@ public class WebsiteBusinessProfileServiceImplementation
         );
 
         if (requestedUpdate.getIsActive() != null) {
-            if (requestedUpdate.getIsActive()
-                    && websiteBusinessProfileRepository
-                    .existsByIsActiveTrueAndBusinessProfileIdNot(
-                            businessProfileId
-                    )) {
+            if (
+                    requestedUpdate.getIsActive()
+                            && websiteBusinessProfileRepository
+                            .existsByIsActiveTrueAndBusinessProfileIdNot(
+                                    businessProfileId
+                            )
+            ) {
                 throw conflict(
                         "Another active website business profile already exists."
                 );
@@ -346,12 +408,26 @@ public class WebsiteBusinessProfileServiceImplementation
             );
         }
 
-        existingProfile.setUpdatedByAdminUser(administrator);
+        existingProfile.setUpdatedByAdminUser(
+                administrator
+        );
 
         WebsiteBusinessProfile savedProfile =
                 saveProfile(existingProfile);
 
         synchronizeMediaUsages(savedProfile);
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.BUSINESS_PROFILE,
+                savedProfile.getBusinessProfileId(),
+                savedProfile.getBusinessName(),
+                beforeSnapshot,
+                createProfileSnapshot(savedProfile),
+                "Website business profile updated.",
+                null
+        );
 
         return getBusinessProfile(
                 savedProfile.getBusinessProfileId()
@@ -368,7 +444,9 @@ public class WebsiteBusinessProfileServiceImplementation
         );
 
         return websiteBusinessProfileRepository
-                .findByBusinessProfileId(businessProfileId)
+                .findByBusinessProfileId(
+                        businessProfileId
+                )
                 .orElseThrow(() -> notFound(
                         "Website business profile was not found."
                 ));
@@ -399,18 +477,36 @@ public class WebsiteBusinessProfileServiceImplementation
             return getBusinessProfile(businessProfileId);
         }
 
-        if (websiteBusinessProfileRepository
-                .existsByIsActiveTrueAndBusinessProfileIdNot(
-                        businessProfileId
-                )) {
+        if (
+                websiteBusinessProfileRepository
+                        .existsByIsActiveTrueAndBusinessProfileIdNot(
+                                businessProfileId
+                        )
+        ) {
             throw conflict(
                     "Another active website business profile already exists."
             );
         }
 
+        JsonNode beforeSnapshot =
+                createProfileSnapshot(profile);
+
         profile.activate(administrator);
 
-        saveProfile(profile);
+        WebsiteBusinessProfile savedProfile =
+                saveProfile(profile);
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.BUSINESS_PROFILE,
+                savedProfile.getBusinessProfileId(),
+                savedProfile.getBusinessName(),
+                beforeSnapshot,
+                createProfileSnapshot(savedProfile),
+                "Website business profile activated.",
+                null
+        );
 
         return getBusinessProfile(businessProfileId);
     }
@@ -431,20 +527,154 @@ public class WebsiteBusinessProfileServiceImplementation
             return getBusinessProfile(businessProfileId);
         }
 
+        JsonNode beforeSnapshot =
+                createProfileSnapshot(profile);
+
         profile.deactivate(administrator);
 
-        saveProfile(profile);
+        WebsiteBusinessProfile savedProfile =
+                saveProfile(profile);
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.BUSINESS_PROFILE,
+                savedProfile.getBusinessProfileId(),
+                savedProfile.getBusinessName(),
+                beforeSnapshot,
+                createProfileSnapshot(savedProfile),
+                "Website business profile deactivated.",
+                null
+        );
 
         return getBusinessProfile(businessProfileId);
+    }
+
+    private JsonNode createProfileSnapshot(
+            WebsiteBusinessProfile profile
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "businessProfileId",
+                profile.getBusinessProfileId()
+        );
+
+        fields.put(
+                "businessName",
+                profile.getBusinessName()
+        );
+
+        fields.put(
+                "legalBusinessName",
+                profile.getLegalBusinessName()
+        );
+
+        fields.put(
+                "tagline",
+                profile.getTagline()
+        );
+
+        fields.put(
+                "secondaryTagline",
+                profile.getSecondaryTagline()
+        );
+
+        fields.put(
+                "city",
+                profile.getCity()
+        );
+
+        fields.put(
+                "stateRegion",
+                profile.getStateRegion()
+        );
+
+        fields.put(
+                "countryCode",
+                profile.getCountryCode()
+        );
+
+        fields.put(
+                "serviceArea",
+                profile.getServiceArea()
+        );
+
+        fields.put(
+                "appointmentOnly",
+                profile.getAppointmentOnly()
+        );
+
+        fields.put(
+                "defaultLocale",
+                profile.getDefaultLocale()
+        );
+
+        fields.put(
+                "defaultTimezone",
+                profile.getDefaultTimezone()
+        );
+
+        fields.put(
+                "primaryDomain",
+                profile.getPrimaryDomain()
+        );
+
+        fields.put(
+                "primaryLogoMediaId",
+                getMediaAssetId(
+                        profile.getPrimaryLogoMedia()
+                )
+        );
+
+        fields.put(
+                "lightLogoMediaId",
+                getMediaAssetId(
+                        profile.getLightLogoMedia()
+                )
+        );
+
+        fields.put(
+                "darkLogoMediaId",
+                getMediaAssetId(
+                        profile.getDarkLogoMedia()
+                )
+        );
+
+        fields.put(
+                "faviconMediaId",
+                getMediaAssetId(
+                        profile.getFaviconMedia()
+                )
+        );
+
+        fields.put(
+                "defaultSocialImageMediaId",
+                getMediaAssetId(
+                        profile.getDefaultSocialImageMedia()
+                )
+        );
+
+        fields.put(
+                "isActive",
+                profile.getIsActive()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
     }
 
     private void synchronizeMediaUsages(
             WebsiteBusinessProfile profile
     ) {
-        UUID resourceId = profile.getBusinessProfileId();
+        UUID resourceId =
+                profile.getBusinessProfileId();
 
         websiteMediaUsageService.replaceUsage(
-                getMediaAssetId(profile.getPrimaryLogoMedia()),
+                getMediaAssetId(
+                        profile.getPrimaryLogoMedia()
+                ),
                 WebsiteMediaUsageResourceType.BUSINESS_PROFILE,
                 resourceId,
                 PRIMARY_LOGO_USAGE,
@@ -452,7 +682,9 @@ public class WebsiteBusinessProfileServiceImplementation
         );
 
         websiteMediaUsageService.replaceUsage(
-                getMediaAssetId(profile.getLightLogoMedia()),
+                getMediaAssetId(
+                        profile.getLightLogoMedia()
+                ),
                 WebsiteMediaUsageResourceType.BUSINESS_PROFILE,
                 resourceId,
                 LIGHT_LOGO_USAGE,
@@ -460,7 +692,9 @@ public class WebsiteBusinessProfileServiceImplementation
         );
 
         websiteMediaUsageService.replaceUsage(
-                getMediaAssetId(profile.getDarkLogoMedia()),
+                getMediaAssetId(
+                        profile.getDarkLogoMedia()
+                ),
                 WebsiteMediaUsageResourceType.BUSINESS_PROFILE,
                 resourceId,
                 DARK_LOGO_USAGE,
@@ -468,7 +702,9 @@ public class WebsiteBusinessProfileServiceImplementation
         );
 
         websiteMediaUsageService.replaceUsage(
-                getMediaAssetId(profile.getFaviconMedia()),
+                getMediaAssetId(
+                        profile.getFaviconMedia()
+                ),
                 WebsiteMediaUsageResourceType.BUSINESS_PROFILE,
                 resourceId,
                 FAVICON_USAGE,
@@ -490,8 +726,10 @@ public class WebsiteBusinessProfileServiceImplementation
             WebsiteMediaAsset requestedMedia,
             String fieldName
     ) {
-        if (requestedMedia == null
-                || requestedMedia.getMediaAssetId() == null) {
+        if (
+                requestedMedia == null
+                        || requestedMedia.getMediaAssetId() == null
+        ) {
             return null;
         }
 
@@ -501,25 +739,31 @@ public class WebsiteBusinessProfileServiceImplementation
                                 requestedMedia.getMediaAssetId()
                         )
                         .orElseThrow(() -> notFound(
-                                fieldName + " media asset was not found."
+                                fieldName
+                                        + " media asset was not found."
                         ));
 
-        if (mediaAsset.getAssetStatus()
-                != WebsiteMediaAssetStatus.ACTIVE) {
+        if (
+                mediaAsset.getAssetStatus()
+                        != WebsiteMediaAssetStatus.ACTIVE
+        ) {
             throw conflict(
-                    fieldName + " must reference an active media asset."
+                    fieldName
+                            + " must reference an active media asset."
             );
         }
 
         if (!Boolean.TRUE.equals(mediaAsset.getIsPublic())) {
             throw conflict(
-                    fieldName + " must reference a public media asset."
+                    fieldName
+                            + " must reference a public media asset."
             );
         }
 
         if (!mediaAsset.isPubliclyAvailable()) {
             throw conflict(
-                    fieldName + " is not publicly available."
+                    fieldName
+                            + " is not publicly available."
             );
         }
 
@@ -549,7 +793,8 @@ public class WebsiteBusinessProfileServiceImplementation
                 "Administrator ID"
         );
 
-        return adminUserRepository.findById(administratorId)
+        return adminUserRepository
+                .findById(administratorId)
                 .orElseThrow(() -> notFound(
                         "Administrator account was not found."
                 ));
@@ -564,8 +809,12 @@ public class WebsiteBusinessProfileServiceImplementation
             );
         }
 
-        if (isBlank(profile.getCountryCode())
-                || profile.getCountryCode().trim().length() != 2) {
+        if (
+                isBlank(profile.getCountryCode())
+                        || profile.getCountryCode()
+                        .trim()
+                        .length() != 2
+        ) {
             throw badRequest(
                     "Country code must contain exactly two characters."
             );
@@ -588,9 +837,8 @@ public class WebsiteBusinessProfileServiceImplementation
             WebsiteBusinessProfile profile
     ) {
         try {
-            return websiteBusinessProfileRepository.saveAndFlush(
-                    profile
-            );
+            return websiteBusinessProfileRepository
+                    .saveAndFlush(profile);
         } catch (DataIntegrityViolationException exception) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -620,8 +868,11 @@ public class WebsiteBusinessProfileServiceImplementation
         }
     }
 
-    private boolean isBlank(String value) {
-        return value == null || value.trim().isEmpty();
+    private boolean isBlank(
+            String value
+    ) {
+        return value == null
+                || value.trim().isEmpty();
     }
 
     private ResponseStatusException badRequest(

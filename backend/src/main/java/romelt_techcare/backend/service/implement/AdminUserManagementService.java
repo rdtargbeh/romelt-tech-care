@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
@@ -13,11 +14,18 @@ import romelt_techcare.backend.dto.AdminUserStatusRequest;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.enums.AdminRole;
 import romelt_techcare.backend.enums.AdminStatus;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.exception.AdminUserManagementException;
 import romelt_techcare.backend.repository.AdminUserRepository;
+import romelt_techcare.backend.service.AdminPasswordPolicyService;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -38,30 +46,29 @@ import java.util.UUID;
  * - Deletes administrator accounts when permitted.
  * - Protects the final active SUPER_ADMIN account.
  * - Prevents unsafe self-management operations.
+ * - Records immutable audit events for all administrator-account
+ *   mutations.
  *
- * Authorization:
- * Every operation requires an authenticated SUPER_ADMIN principal.
- * Controller method security also enforces ROLE_SUPER_ADMIN.
- *
- * Security rules:
- * - Plain-text passwords are never persisted.
- * - Passwords are validated and encoded by
- *   AdminPasswordPolicyService.
- * - Password hashes are never returned.
- * - Existing administrator identities are checked against the JWT
- *   principal before management operations continue.
+ * Security:
+ * Passwords and password hashes are never included in audit snapshots.
  * ================================================================
  */
 @Service
 @RequiredArgsConstructor
 public class AdminUserManagementService {
 
-    private final AdminUserRepository adminUserRepository;
-    private final romelt_techcare.backend.service.AdminPasswordPolicyService passwordPolicyService;
+    private final AdminUserRepository
+            adminUserRepository;
 
-    /**
-     * Creates a new administrator account with a temporary password.
-     */
+    private final AdminPasswordPolicyService
+            passwordPolicyService;
+
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
+
     @Transactional
     public AdminUserResponse createAdministrator(
             AdminJwtPrincipal principal,
@@ -70,18 +77,26 @@ public class AdminUserManagementService {
         requireSuperAdministrator(principal);
 
         String email = normalizeEmail(request.email());
+
         String firstName = normalizeRequiredText(
                 request.firstName(),
                 "First name is required."
         );
+
         String lastName = normalizeRequiredText(
                 request.lastName(),
                 "Last name is required."
         );
-        String jobTitle = trimToNull(request.jobTitle());
 
-        if (adminUserRepository.existsByEmailIgnoreCase(email)) {
-            throw AdminUserManagementException.duplicateEmail();
+        String jobTitle =
+                trimToNull(request.jobTitle());
+
+        if (
+                adminUserRepository
+                        .existsByEmailIgnoreCase(email)
+        ) {
+            throw AdminUserManagementException
+                    .duplicateEmail();
         }
 
         String encodedPassword;
@@ -101,18 +116,19 @@ public class AdminUserManagementService {
                     );
         }
 
-        AdminUser administrator = AdminUser.builder()
-                .email(email)
-                .firstName(firstName)
-                .lastName(lastName)
-                .jobTitle(jobTitle)
-                .role(request.role())
-                .status(AdminStatus.ACTIVE)
-                .mustChangePassword(true)
-                .failedLoginAttempts(0)
-                .lockedUntil(null)
-                .lastLoginAt(null)
-                .build();
+        AdminUser administrator =
+                AdminUser.builder()
+                        .email(email)
+                        .firstName(firstName)
+                        .lastName(lastName)
+                        .jobTitle(jobTitle)
+                        .role(request.role())
+                        .status(AdminStatus.ACTIVE)
+                        .mustChangePassword(true)
+                        .failedLoginAttempts(0)
+                        .lockedUntil(null)
+                        .lastLoginAt(null)
+                        .build();
 
         administrator.changePassword(
                 encodedPassword,
@@ -120,15 +136,31 @@ public class AdminUserManagementService {
         );
 
         AdminUser savedAdministrator =
-                adminUserRepository.save(administrator);
+                adminUserRepository.saveAndFlush(
+                        administrator
+                );
 
-        return AdminUserResponse.from(savedAdministrator);
+        websiteContentAuditLogService.recordAudit(
+                principal.adminUserId(),
+                WebsiteContentAuditAction.CREATE,
+                WebsiteContentAuditResourceType.ADMIN_USER,
+                savedAdministrator.getAdminUserId(),
+                createAdministratorResourceName(
+                        savedAdministrator
+                ),
+                null,
+                createAdministratorSnapshot(
+                        savedAdministrator
+                ),
+                "Administrator account created.",
+                null
+        );
+
+        return AdminUserResponse.from(
+                savedAdministrator
+        );
     }
 
-    /**
-     * Lists administrator accounts with optional role and status
-     * filters.
-     */
     @Transactional(readOnly = true)
     public List<AdminUserResponse> getAdministrators(
             AdminJwtPrincipal principal,
@@ -173,9 +205,6 @@ public class AdminUserManagementService {
                 .toList();
     }
 
-    /**
-     * Retrieves one administrator account.
-     */
     @Transactional(readOnly = true)
     public AdminUserResponse getAdministrator(
             AdminJwtPrincipal principal,
@@ -188,9 +217,6 @@ public class AdminUserManagementService {
         );
     }
 
-    /**
-     * Updates administrator identity and role information.
-     */
     @Transactional
     public AdminUserResponse updateAdministrator(
             AdminJwtPrincipal principal,
@@ -202,6 +228,11 @@ public class AdminUserManagementService {
         AdminUser administrator =
                 findAdministrator(adminUserId);
 
+        JsonNode beforeSnapshot =
+                createAdministratorSnapshot(
+                        administrator
+                );
+
         String normalizedEmail =
                 normalizeEmail(request.email());
 
@@ -212,13 +243,17 @@ public class AdminUserManagementService {
                                 adminUserId
                         )
         ) {
-            throw AdminUserManagementException.duplicateEmail();
+            throw AdminUserManagementException
+                    .duplicateEmail();
         }
 
         boolean isDemotingActiveSuperAdministrator =
-                administrator.getRole() == AdminRole.SUPER_ADMIN
-                        && administrator.getStatus() == AdminStatus.ACTIVE
-                        && request.role() != AdminRole.SUPER_ADMIN;
+                administrator.getRole()
+                        == AdminRole.SUPER_ADMIN
+                        && administrator.getStatus()
+                        == AdminStatus.ACTIVE
+                        && request.role()
+                        != AdminRole.SUPER_ADMIN;
 
         if (isDemotingActiveSuperAdministrator) {
             ensureAnotherActiveSuperAdministratorExists(
@@ -227,32 +262,53 @@ public class AdminUserManagementService {
         }
 
         administrator.setEmail(normalizedEmail);
+
         administrator.setFirstName(
                 normalizeRequiredText(
                         request.firstName(),
                         "First name is required."
                 )
         );
+
         administrator.setLastName(
                 normalizeRequiredText(
                         request.lastName(),
                         "Last name is required."
                 )
         );
+
         administrator.setJobTitle(
                 trimToNull(request.jobTitle())
         );
+
         administrator.setRole(request.role());
 
         AdminUser savedAdministrator =
-                adminUserRepository.save(administrator);
+                adminUserRepository.saveAndFlush(
+                        administrator
+                );
 
-        return AdminUserResponse.from(savedAdministrator);
+        websiteContentAuditLogService.recordAudit(
+                principal.adminUserId(),
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.ADMIN_USER,
+                savedAdministrator.getAdminUserId(),
+                createAdministratorResourceName(
+                        savedAdministrator
+                ),
+                beforeSnapshot,
+                createAdministratorSnapshot(
+                        savedAdministrator
+                ),
+                "Administrator identity or role information updated.",
+                null
+        );
+
+        return AdminUserResponse.from(
+                savedAdministrator
+        );
     }
 
-    /**
-     * Changes account status.
-     */
     @Transactional
     public AdminUserResponse changeAdministratorStatus(
             AdminJwtPrincipal principal,
@@ -264,6 +320,14 @@ public class AdminUserManagementService {
         AdminUser administrator =
                 findAdministrator(adminUserId);
 
+        JsonNode beforeSnapshot =
+                createAdministratorSnapshot(
+                        administrator
+                );
+
+        AdminStatus previousStatus =
+                administrator.getStatus();
+
         AdminStatus requestedStatus =
                 request.status();
 
@@ -274,16 +338,20 @@ public class AdminUserManagementService {
 
         if (
                 isSelf
-                        && requestedStatus != AdminStatus.ACTIVE
+                        && requestedStatus
+                        != AdminStatus.ACTIVE
         ) {
             throw AdminUserManagementException
                     .selfStatusChangeNotAllowed();
         }
 
         boolean isRemovingActiveSuperAdministrator =
-                administrator.getRole() == AdminRole.SUPER_ADMIN
-                        && administrator.getStatus() == AdminStatus.ACTIVE
-                        && requestedStatus != AdminStatus.ACTIVE;
+                administrator.getRole()
+                        == AdminRole.SUPER_ADMIN
+                        && administrator.getStatus()
+                        == AdminStatus.ACTIVE
+                        && requestedStatus
+                        != AdminStatus.ACTIVE;
 
         if (isRemovingActiveSuperAdministrator) {
             ensureAnotherActiveSuperAdministratorExists(
@@ -292,27 +360,52 @@ public class AdminUserManagementService {
         }
 
         switch (requestedStatus) {
-            case ACTIVE -> administrator.unlockAccount();
+            case ACTIVE ->
+                    administrator.unlockAccount();
 
             case INACTIVE -> {
-                administrator.setStatus(AdminStatus.INACTIVE);
+                administrator.setStatus(
+                        AdminStatus.INACTIVE
+                );
+
                 administrator.setLockedUntil(null);
                 administrator.setFailedLoginAttempts(0);
             }
 
-            case LOCKED -> administrator.lockAccount();
+            case LOCKED ->
+                    administrator.lockAccount();
         }
 
         AdminUser savedAdministrator =
-                adminUserRepository.save(administrator);
+                adminUserRepository.saveAndFlush(
+                        administrator
+                );
 
-        return AdminUserResponse.from(savedAdministrator);
+        websiteContentAuditLogService.recordAudit(
+                principal.adminUserId(),
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.ADMIN_USER,
+                savedAdministrator.getAdminUserId(),
+                createAdministratorResourceName(
+                        savedAdministrator
+                ),
+                beforeSnapshot,
+                createAdministratorSnapshot(
+                        savedAdministrator
+                ),
+                "Administrator status changed from "
+                        + previousStatus
+                        + " to "
+                        + savedAdministrator.getStatus()
+                        + ".",
+                null
+        );
+
+        return AdminUserResponse.from(
+                savedAdministrator
+        );
     }
 
-    /**
-     * Replaces another administrator's password with a temporary
-     * password and requires a password change after login.
-     */
     @Transactional
     public AdminUserResponse resetAdministratorPassword(
             AdminJwtPrincipal principal,
@@ -332,6 +425,11 @@ public class AdminUserManagementService {
             throw AdminUserManagementException
                     .selfPasswordResetNotAllowed();
         }
+
+        JsonNode beforeSnapshot =
+                createAdministratorSnapshot(
+                        administrator
+                );
 
         String encodedPassword;
 
@@ -355,23 +453,33 @@ public class AdminUserManagementService {
                 true
         );
 
-        /*
-         * A password reset does not automatically reactivate an
-         * administratively disabled account.
-         *
-         * It does clear temporary login lock information through
-         * AdminUser.changePassword(...).
-         */
         AdminUser savedAdministrator =
-                adminUserRepository.save(administrator);
+                adminUserRepository.saveAndFlush(
+                        administrator
+                );
 
-        return AdminUserResponse.from(savedAdministrator);
+        websiteContentAuditLogService.recordAudit(
+                principal.adminUserId(),
+                WebsiteContentAuditAction.UPDATE,
+                WebsiteContentAuditResourceType.ADMIN_USER,
+                savedAdministrator.getAdminUserId(),
+                createAdministratorResourceName(
+                        savedAdministrator
+                ),
+                beforeSnapshot,
+                createAdministratorSnapshot(
+                        savedAdministrator
+                ),
+                "Administrator temporary password reset. "
+                        + "No password value or hash was recorded.",
+                null
+        );
+
+        return AdminUserResponse.from(
+                savedAdministrator
+        );
     }
 
-    /**
-     * Deletes an administrator account when all safety requirements
-     * are satisfied.
-     */
     @Transactional
     public void deleteAdministrator(
             AdminJwtPrincipal principal,
@@ -392,43 +500,158 @@ public class AdminUserManagementService {
         }
 
         if (
-                administrator.getRole() == AdminRole.SUPER_ADMIN
-                        && administrator.getStatus() == AdminStatus.ACTIVE
+                administrator.getRole()
+                        == AdminRole.SUPER_ADMIN
+                        && administrator.getStatus()
+                        == AdminStatus.ACTIVE
         ) {
             ensureAnotherActiveSuperAdministratorExists(
                     administrator
             );
         }
 
+        JsonNode beforeSnapshot =
+                createAdministratorSnapshot(
+                        administrator
+                );
+
+        String resourceName =
+                createAdministratorResourceName(
+                        administrator
+                );
+
+        UUID deletedAdministratorId =
+                administrator.getAdminUserId();
+
         adminUserRepository.delete(administrator);
+        adminUserRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                principal.adminUserId(),
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.ADMIN_USER,
+                deletedAdministratorId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Administrator account deleted.",
+                null
+        );
     }
 
-    /**
-     * Ensures that the authenticated principal represents an existing,
-     * active SUPER_ADMIN account.
-     */
+    private JsonNode createAdministratorSnapshot(
+            AdminUser administrator
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "adminUserId",
+                administrator.getAdminUserId()
+        );
+
+        fields.put(
+                "email",
+                administrator.getEmail()
+        );
+
+        fields.put(
+                "firstName",
+                administrator.getFirstName()
+        );
+
+        fields.put(
+                "lastName",
+                administrator.getLastName()
+        );
+
+        fields.put(
+                "jobTitle",
+                administrator.getJobTitle()
+        );
+
+        fields.put(
+                "role",
+                administrator.getRole()
+        );
+
+        fields.put(
+                "status",
+                administrator.getStatus()
+        );
+
+        fields.put(
+                "mustChangePassword",
+                administrator.getMustChangePassword()
+        );
+
+        fields.put(
+                "failedLoginAttempts",
+                administrator.getFailedLoginAttempts()
+        );
+
+        fields.put(
+                "lockedUntil",
+                administrator.getLockedUntil()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createAdministratorResourceName(
+            AdminUser administrator
+    ) {
+        String firstName =
+                trimToNull(
+                        administrator.getFirstName()
+                );
+
+        String lastName =
+                trimToNull(
+                        administrator.getLastName()
+                );
+
+        String fullName =
+                String.join(
+                        " ",
+                        firstName == null ? "" : firstName,
+                        lastName == null ? "" : lastName
+                ).trim();
+
+        if (!fullName.isBlank()) {
+            return fullName;
+        }
+
+        return administrator.getEmail();
+    }
+
     private void requireSuperAdministrator(
             AdminJwtPrincipal principal
     ) {
         if (
                 principal == null
                         || principal.adminUserId() == null
-                        || principal.role() != AdminRole.SUPER_ADMIN
+                        || principal.role()
+                        != AdminRole.SUPER_ADMIN
         ) {
             throw AdminUserManagementException
                     .unauthorizedManager();
         }
 
-        AdminUser manager = adminUserRepository
-                .findById(principal.adminUserId())
-                .orElseThrow(
-                        AdminUserManagementException
-                                ::unauthorizedManager
-                );
+        AdminUser manager =
+                adminUserRepository
+                        .findById(principal.adminUserId())
+                        .orElseThrow(
+                                AdminUserManagementException
+                                        ::unauthorizedManager
+                        );
 
         if (
-                manager.getRole() != AdminRole.SUPER_ADMIN
-                        || manager.getStatus() != AdminStatus.ACTIVE
+                manager.getRole()
+                        != AdminRole.SUPER_ADMIN
+                        || manager.getStatus()
+                        != AdminStatus.ACTIVE
                         || manager.isLocked()
         ) {
             throw AdminUserManagementException
@@ -440,7 +663,8 @@ public class AdminUserManagementService {
             UUID adminUserId
     ) {
         if (adminUserId == null) {
-            throw AdminUserManagementException.notFound();
+            throw AdminUserManagementException
+                    .notFound();
         }
 
         return adminUserRepository
@@ -451,10 +675,6 @@ public class AdminUserManagementService {
                 );
     }
 
-    /**
-     * Prevents removal, deactivation, or demotion of the final active
-     * SUPER_ADMIN.
-     */
     private void ensureAnotherActiveSuperAdministratorExists(
             AdminUser affectedAdministrator
     ) {

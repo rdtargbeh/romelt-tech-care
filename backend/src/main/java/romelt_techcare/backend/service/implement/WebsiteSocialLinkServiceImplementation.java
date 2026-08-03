@@ -1,5 +1,6 @@
 package romelt_techcare.backend.service.implement;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -10,14 +11,20 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.WebsiteSocialLink;
+import romelt_techcare.backend.enums.WebsiteContentAuditAction;
+import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.WebsiteSocialLinkRepository;
+import romelt_techcare.backend.service.WebsiteContentAuditLogService;
+import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 import romelt_techcare.backend.service.WebsiteSocialLinkService;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 
 /**
@@ -37,6 +44,7 @@ import java.util.UUID;
  * - Supports administrator search and public retrieval.
  * - Activates, deactivates, and deletes links.
  * - Records the administrator responsible for each write.
+ * - Records immutable content audit entries.
  *
  * Publishing behavior:
  * Active links become publicly available immediately after persistence.
@@ -57,9 +65,12 @@ public class WebsiteSocialLinkServiceImplementation
 
     private final AdminUserRepository adminUserRepository;
 
-    /**
-     * Creates a new social link.
-     */
+    private final WebsiteContentAuditLogService
+            websiteContentAuditLogService;
+
+    private final WebsiteContentAuditSnapshotService
+            websiteContentAuditSnapshotService;
+
     @Override
     @Transactional
     public WebsiteSocialLink createSocialLink(
@@ -112,15 +123,23 @@ public class WebsiteSocialLinkServiceImplementation
                         .updatedByAdminUser(administrator)
                         .build();
 
-        return saveSocialLink(
-                socialLinkToCreate,
-                "A website social link already exists for this platform."
+        WebsiteSocialLink savedSocialLink =
+                saveSocialLink(
+                        socialLinkToCreate,
+                        "A website social link already exists for this platform."
+                );
+
+        recordSocialLinkAudit(
+                administratorId,
+                WebsiteContentAuditAction.CREATE,
+                savedSocialLink,
+                null,
+                "Website social link created."
         );
+
+        return savedSocialLink;
     }
 
-    /**
-     * Updates an existing social link.
-     */
     @Override
     @Transactional
     public WebsiteSocialLink updateSocialLink(
@@ -144,6 +163,9 @@ public class WebsiteSocialLinkServiceImplementation
 
         WebsiteSocialLink existingSocialLink =
                 getSocialLinkForUpdate(socialLinkId);
+
+        JsonNode beforeSnapshot =
+                createSocialLinkSnapshot(existingSocialLink);
 
         String normalizedPlatform =
                 normalizePlatform(
@@ -171,15 +193,23 @@ public class WebsiteSocialLinkServiceImplementation
                 administrator
         );
 
-        return saveSocialLink(
-                existingSocialLink,
-                "Another website social link already uses this platform."
+        WebsiteSocialLink savedSocialLink =
+                saveSocialLink(
+                        existingSocialLink,
+                        "Another website social link already uses this platform."
+                );
+
+        recordSocialLinkAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSocialLink,
+                beforeSnapshot,
+                "Website social link updated."
         );
+
+        return savedSocialLink;
     }
 
-    /**
-     * Retrieves one social link.
-     */
     @Override
     public WebsiteSocialLink getSocialLink(
             UUID socialLinkId
@@ -196,9 +226,6 @@ public class WebsiteSocialLinkServiceImplementation
                 ));
     }
 
-    /**
-     * Retrieves one link by normalized platform.
-     */
     @Override
     public WebsiteSocialLink getSocialLinkByPlatform(
             String platform
@@ -213,9 +240,6 @@ public class WebsiteSocialLinkServiceImplementation
                 ));
     }
 
-    /**
-     * Searches administrator-facing records.
-     */
     @Override
     public Page<WebsiteSocialLink> searchSocialLinks(
             String keyword,
@@ -232,9 +256,6 @@ public class WebsiteSocialLinkServiceImplementation
                 );
     }
 
-    /**
-     * Retrieves active public links.
-     */
     @Override
     public List<WebsiteSocialLink>
     getActivePublicSocialLinks() {
@@ -242,9 +263,6 @@ public class WebsiteSocialLinkServiceImplementation
                 .findAllByIsActiveTrueOrderByDisplayOrderAscPlatformAsc();
     }
 
-    /**
-     * Updates active status.
-     */
     @Override
     @Transactional
     public WebsiteSocialLink updateSocialLinkStatus(
@@ -258,20 +276,33 @@ public class WebsiteSocialLinkServiceImplementation
         WebsiteSocialLink socialLink =
                 getSocialLinkForUpdate(socialLinkId);
 
+        JsonNode beforeSnapshot =
+                createSocialLinkSnapshot(socialLink);
+
         if (isActive) {
             socialLink.activate(administrator);
         } else {
             socialLink.deactivate(administrator);
         }
 
-        return websiteSocialLinkRepository.save(
-                socialLink
+        WebsiteSocialLink savedSocialLink =
+                websiteSocialLinkRepository.save(
+                        socialLink
+                );
+
+        recordSocialLinkAudit(
+                administratorId,
+                WebsiteContentAuditAction.UPDATE,
+                savedSocialLink,
+                beforeSnapshot,
+                isActive
+                        ? "Website social link activated."
+                        : "Website social link deactivated."
         );
+
+        return savedSocialLink;
     }
 
-    /**
-     * Activates a social link.
-     */
     @Override
     @Transactional
     public WebsiteSocialLink activateSocialLink(
@@ -285,9 +316,6 @@ public class WebsiteSocialLinkServiceImplementation
         );
     }
 
-    /**
-     * Deactivates a social link.
-     */
     @Override
     @Transactional
     public WebsiteSocialLink deactivateSocialLink(
@@ -301,9 +329,6 @@ public class WebsiteSocialLinkServiceImplementation
         );
     }
 
-    /**
-     * Permanently deletes a social link.
-     */
     @Override
     @Transactional
     public void deleteSocialLink(
@@ -315,23 +340,133 @@ public class WebsiteSocialLinkServiceImplementation
         WebsiteSocialLink socialLink =
                 getSocialLinkForUpdate(socialLinkId);
 
+        JsonNode beforeSnapshot =
+                createSocialLinkSnapshot(socialLink);
+
+        UUID resourceId =
+                socialLink.getSocialLinkId();
+
+        String resourceName =
+                createSocialLinkResourceName(socialLink);
+
         websiteSocialLinkRepository.delete(
                 socialLink
         );
+
+        websiteSocialLinkRepository.flush();
+
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                WebsiteContentAuditAction.DELETE,
+                WebsiteContentAuditResourceType.SOCIAL_LINK,
+                resourceId,
+                resourceName,
+                beforeSnapshot,
+                null,
+                "Website social link permanently deleted.",
+                null
+        );
     }
 
-    /**
-     * Counts active links.
-     */
     @Override
     public long countActiveSocialLinks() {
         return websiteSocialLinkRepository
                 .countByIsActiveTrue();
     }
 
-    /**
-     * Retrieves and locks one social link for writing.
-     */
+    private void recordSocialLinkAudit(
+            UUID administratorId,
+            WebsiteContentAuditAction action,
+            WebsiteSocialLink socialLink,
+            JsonNode beforeSnapshot,
+            String changeSummary
+    ) {
+        websiteContentAuditLogService.recordAudit(
+                administratorId,
+                action,
+                WebsiteContentAuditResourceType.SOCIAL_LINK,
+                socialLink.getSocialLinkId(),
+                createSocialLinkResourceName(socialLink),
+                beforeSnapshot,
+                createSocialLinkSnapshot(socialLink),
+                changeSummary,
+                null
+        );
+    }
+
+    private JsonNode createSocialLinkSnapshot(
+            WebsiteSocialLink socialLink
+    ) {
+        Map<String, Object> fields =
+                new LinkedHashMap<>();
+
+        fields.put(
+                "socialLinkId",
+                socialLink.getSocialLinkId()
+        );
+
+        fields.put(
+                "platform",
+                socialLink.getPlatform()
+        );
+
+        fields.put(
+                "label",
+                socialLink.getLabel()
+        );
+
+        fields.put(
+                "profileUrl",
+                socialLink.getProfileUrl()
+        );
+
+        fields.put(
+                "iconKey",
+                socialLink.getIconKey()
+        );
+
+        fields.put(
+                "displayOrder",
+                socialLink.getDisplayOrder()
+        );
+
+        fields.put(
+                "isActive",
+                socialLink.getIsActive()
+        );
+
+        fields.put(
+                "createdAt",
+                socialLink.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                socialLink.getUpdatedAt()
+        );
+
+        return websiteContentAuditSnapshotService
+                .createSnapshot(fields);
+    }
+
+    private String createSocialLinkResourceName(
+            WebsiteSocialLink socialLink
+    ) {
+        String label =
+                normalizeOptional(socialLink.getLabel());
+
+        if (label != null) {
+            return label;
+        }
+
+        String platform =
+                normalizeOptional(socialLink.getPlatform());
+
+        return platform == null
+                ? "Website Social Link"
+                : platform;
+    }
+
     private WebsiteSocialLink getSocialLinkForUpdate(
             UUID socialLinkId
     ) {
@@ -347,9 +482,6 @@ public class WebsiteSocialLinkServiceImplementation
                 ));
     }
 
-    /**
-     * Ensures the normalized platform is unique.
-     */
     private void validatePlatformAvailability(
             String platform,
             UUID currentSocialLinkId
@@ -374,9 +506,6 @@ public class WebsiteSocialLinkServiceImplementation
         }
     }
 
-    /**
-     * Validates editable input.
-     */
     private void validateEditableFields(
             WebsiteSocialLink socialLink
     ) {
@@ -446,9 +575,6 @@ public class WebsiteSocialLinkServiceImplementation
         );
     }
 
-    /**
-     * Normalizes and validates a public HTTP or HTTPS URL.
-     */
     private String normalizeAndValidateUrl(
             String value
     ) {
@@ -487,9 +613,6 @@ public class WebsiteSocialLinkServiceImplementation
         }
     }
 
-    /**
-     * Normalizes the stable platform key.
-     */
     private String normalizePlatform(
             String value
     ) {
@@ -521,9 +644,6 @@ public class WebsiteSocialLinkServiceImplementation
         return normalized;
     }
 
-    /**
-     * Normalizes a frontend icon key.
-     */
     private String normalizeIconKey(
             String value
     ) {
@@ -551,9 +671,6 @@ public class WebsiteSocialLinkServiceImplementation
         return normalized;
     }
 
-    /**
-     * Retrieves the administrator responsible for a write operation.
-     */
     private AdminUser getRequiredAdministrator(
             UUID administratorId
     ) {
