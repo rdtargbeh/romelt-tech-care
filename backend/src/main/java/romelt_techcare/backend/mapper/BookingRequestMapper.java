@@ -5,6 +5,7 @@ import romelt_techcare.backend.dto.AdminBookingRequestCreateRequest;
 import romelt_techcare.backend.dto.BookingRequestConfirmationResponse;
 import romelt_techcare.backend.dto.BookingRequestCreateRequest;
 import romelt_techcare.backend.entity.BookingRequest;
+import romelt_techcare.backend.enums.BookingFor;
 import romelt_techcare.backend.enums.BookingRequestStatus;
 import romelt_techcare.backend.enums.BookingSource;
 
@@ -17,74 +18,97 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Converts public and administrator booking request DTOs into the
- * shared BookingRequest entity.
+ * Converts public and administrator booking DTOs into the existing
+ * BookingRequest entity while integrating the new fields.
  *
- * Responsibilities:
- * - Normalizes customer-provided text.
- * - Maps public website booking requests.
- * - Maps administrator-created customer bookings.
- * - Records booking source and creating administrator.
- * - Assigns the initial PENDING status.
- * - Creates a safe public confirmation response.
- *
- * Security:
- * Private administrator notes are never included in the public
- * confirmation response.
+ * Normalization:
+ * - Original values remain available for display.
+ * - Email matching values are converted to lowercase.
+ * - Phone matching values contain digits only.
  * ================================================================
  */
 @Component
 public class BookingRequestMapper {
 
-    /**
-     * Maps a public website booking request.
-     */
+    private static final String PUBLIC_CONSENT_VERSION =
+            "PUBLIC_BOOKING_CONSENT_V1";
+
     public BookingRequest toEntity(
             BookingRequestCreateRequest request,
             String referenceNumber
     ) {
         requirePublicRequest(request);
 
-        return BookingRequest.builder()
-                .referenceNumber(
-                        normalizeRequired(referenceNumber)
+        String email = normalizeEmail(request.email());
+        String phone = normalizeRequired(request.phone());
+
+        BookingRequest bookingRequest = BookingRequest.builder()
+                .referenceNumber(normalizeRequired(referenceNumber))
+                .bookingFor(request.bookingFor())
+                .fullName(normalizeRequired(request.fullName()))
+                .email(email)
+                .normalizedEmail(normalizeEmail(email))
+                .phone(phone)
+                .normalizedPhone(normalizePhone(phone))
+                .preferredContactMethod(
+                        request.preferredContactMethod()
                 )
-                .fullName(
-                        normalizeRequired(request.fullName())
+                .notificationEmail(
+                        normalizeEmail(
+                                request.resolvedNotificationEmail()
+                        )
                 )
-                .email(
-                        normalizeEmail(request.email())
+                .notificationPhone(
+                        normalizeOptional(
+                                request.resolvedNotificationPhone()
+                        )
                 )
-                .phone(
-                        normalizeRequired(request.phone())
+                .businessName(
+                        normalizeOptional(request.businessName())
+                )
+                .businessEmail(
+                        normalizeOptionalEmail(request.businessEmail())
+                )
+                .normalizedBusinessEmail(
+                        normalizeOptionalEmail(request.businessEmail())
+                )
+                .businessPhone(
+                        normalizeOptional(request.businessPhone())
+                )
+                .normalizedBusinessPhone(
+                        normalizeOptionalPhone(request.businessPhone())
+                )
+                .businessStreetAddress(
+                        normalizeOptional(
+                                request.businessStreetAddress()
+                        )
+                )
+                .businessCity(
+                        normalizeOptional(request.businessCity())
+                )
+                .businessState(
+                        normalizeOptional(request.businessState())
+                )
+                .businessPostalCode(
+                        normalizeOptional(
+                                request.businessPostalCode()
+                        )
+                )
+                .businessCountryCode(
+                        request.resolvedBusinessCountryCode()
+                )
+                .businessContactRole(
+                        normalizeOptional(
+                                request.businessContactRole()
+                        )
                 )
                 .serviceType(
                         normalizeRequired(request.serviceType())
                 )
-                .serviceMethod(
-                        request.serviceMethod()
-                )
-                .preferredDate(
-                        request.preferredDate()
-                )
-                .preferredTime(
-                        request.preferredTime()
-                )
-                .alternateDate(
-                        request.alternateDate()
-                )
-                .streetAddress(
-                        normalizeOptional(request.streetAddress())
-                )
-                .city(
-                        normalizeOptional(request.city())
-                )
-                .state(
-                        normalizeOptional(request.state())
-                )
-                .postalCode(
-                        normalizeOptional(request.postalCode())
-                )
+                .serviceMethod(request.serviceMethod())
+                .preferredDate(request.preferredDate())
+                .preferredTime(request.preferredTime())
+                .alternateDate(request.alternateDate())
                 .deviceType(
                         normalizeOptional(request.deviceType())
                 )
@@ -93,28 +117,34 @@ public class BookingRequestMapper {
                                 request.problemDescription()
                         )
                 )
-                .preferredContactMethod(
-                        request.preferredContactMethod()
+                .streetAddress(
+                        normalizeOptional(request.streetAddress())
                 )
-                .consentAccepted(
-                        request.consentAccepted()
+                .addressLine2(
+                        normalizeOptional(request.addressLine2())
                 )
-                .status(
-                        BookingRequestStatus.PENDING
+                .city(normalizeOptional(request.city()))
+                .stateRegion(
+                        normalizeOptional(request.stateRegion())
                 )
-                .bookingSource(
-                        BookingSource.WEBSITE
+                .postalCode(
+                        normalizeOptional(request.postalCode())
                 )
-                .createdByAdminUserId(null)
-                .createdByAdminName(null)
-                .adminNotes(null)
+                .countryCode(request.resolvedCountryCode())
+                .consentAccepted(request.consentAccepted())
+                .consentVersion(PUBLIC_CONSENT_VERSION)
+                .status(BookingRequestStatus.PENDING)
+                .bookingSource(BookingSource.WEBSITE)
+                .reviewEligible(true)
                 .build();
+
+        if (bookingRequest.getBookingFor() == BookingFor.PERSONAL) {
+            bookingRequest.clearBusinessDetails();
+        }
+
+        return bookingRequest;
     }
 
-    /**
-     * Maps a booking entered by an authenticated administrator for a
-     * customer.
-     */
     public BookingRequest toAdminEntity(
             AdminBookingRequestCreateRequest request,
             String referenceNumber,
@@ -123,46 +153,86 @@ public class BookingRequestMapper {
     ) {
         requireAdminRequest(request);
 
-        return BookingRequest.builder()
-                .referenceNumber(
-                        normalizeRequired(referenceNumber)
+        String email = normalizeEmail(request.email());
+        String phone = normalizeRequired(request.phone());
+
+        BookingRequest bookingRequest = BookingRequest.builder()
+                .customerId(request.customerId())
+                .referenceNumber(normalizeRequired(referenceNumber))
+                .bookingFor(request.bookingFor())
+                .fullName(normalizeRequired(request.fullName()))
+                .email(email)
+                .normalizedEmail(normalizeEmail(email))
+                .phone(phone)
+                .normalizedPhone(normalizePhone(phone))
+                .preferredContactMethod(
+                        request.preferredContactMethod()
                 )
-                .fullName(
-                        normalizeRequired(request.fullName())
+                .notificationEmail(
+                        normalizeOptionalEmail(
+                                hasText(request.notificationEmail())
+                                        ? request.notificationEmail()
+                                        : request.email()
+                        )
                 )
-                .email(
-                        normalizeEmail(request.email())
+                .notificationPhone(
+                        normalizeOptional(
+                                hasText(request.notificationPhone())
+                                        ? request.notificationPhone()
+                                        : request.phone()
+                        )
                 )
-                .phone(
-                        normalizeRequired(request.phone())
+                .businessName(
+                        normalizeOptional(request.businessName())
                 )
+                .businessEmail(
+                        normalizeOptionalEmail(request.businessEmail())
+                )
+                .normalizedBusinessEmail(
+                        normalizeOptionalEmail(request.businessEmail())
+                )
+                .businessPhone(
+                        normalizeOptional(request.businessPhone())
+                )
+                .normalizedBusinessPhone(
+                        normalizeOptionalPhone(request.businessPhone())
+                )
+                .businessStreetAddress(
+                        normalizeOptional(
+                                request.businessStreetAddress()
+                        )
+                )
+                .businessCity(
+                        normalizeOptional(request.businessCity())
+                )
+                .businessState(
+                        normalizeOptional(request.businessState())
+                )
+                .businessPostalCode(
+                        normalizeOptional(
+                                request.businessPostalCode()
+                        )
+                )
+                .businessCountryCode(
+                        request.bookingFor() == BookingFor.BUSINESS
+                                ? normalizeCountryCode(
+                                request.businessCountryCode()
+                        )
+                                : null
+                )
+                .businessContactRole(
+                        normalizeOptional(
+                                request.businessContactRole()
+                        )
+                )
+                .serviceId(request.serviceId())
                 .serviceType(
                         normalizeRequired(request.serviceType())
                 )
-                .serviceMethod(
-                        request.serviceMethod()
-                )
-                .preferredDate(
-                        request.preferredDate()
-                )
-                .preferredTime(
-                        request.preferredTime()
-                )
-                .alternateDate(
-                        request.alternateDate()
-                )
-                .streetAddress(
-                        normalizeOptional(request.streetAddress())
-                )
-                .city(
-                        normalizeOptional(request.city())
-                )
-                .state(
-                        normalizeOptional(request.state())
-                )
-                .postalCode(
-                        normalizeOptional(request.postalCode())
-                )
+                .serviceMethod(request.serviceMethod())
+                .preferredDate(request.preferredDate())
+                .preferredTime(request.preferredTime())
+                .alternateDate(request.alternateDate())
                 .deviceType(
                         normalizeOptional(request.deviceType())
                 )
@@ -171,36 +241,46 @@ public class BookingRequestMapper {
                                 request.problemDescription()
                         )
                 )
-                .preferredContactMethod(
-                        request.preferredContactMethod()
+                .streetAddress(
+                        normalizeOptional(request.streetAddress())
                 )
-                /*
-                 * The administrator entered this record on the
-                 * customer's behalf, so the customer did not directly
-                 * accept the public website disclaimer.
-                 */
+                .addressLine2(
+                        normalizeOptional(request.addressLine2())
+                )
+                .city(normalizeOptional(request.city()))
+                .stateRegion(
+                        normalizeOptional(request.stateRegion())
+                )
+                .postalCode(
+                        normalizeOptional(request.postalCode())
+                )
+                .countryCode(
+                        normalizeCountryCode(request.countryCode())
+                )
                 .consentAccepted(false)
-                .status(
-                        BookingRequestStatus.PENDING
+                .consentVersion(null)
+                .status(BookingRequestStatus.PENDING)
+                .bookingSource(request.bookingSource())
+                .assignedAdminUserId(
+                        request.assignedAdminUserId()
                 )
-                .bookingSource(
-                        request.bookingSource()
-                )
-                .createdByAdminUserId(
-                        administratorId
-                )
+                .createdByAdminUserId(administratorId)
                 .createdByAdminName(
                         normalizeRequired(administratorName)
                 )
                 .adminNotes(
                         normalizeOptional(request.adminNotes())
                 )
+                .reviewEligible(true)
                 .build();
+
+        if (bookingRequest.getBookingFor() == BookingFor.PERSONAL) {
+            bookingRequest.clearBusinessDetails();
+        }
+
+        return bookingRequest;
     }
 
-    /**
-     * Creates the safe customer-facing booking confirmation.
-     */
     public BookingRequestConfirmationResponse toConfirmationResponse(
             BookingRequest bookingRequest
     ) {
@@ -221,6 +301,84 @@ public class BookingRequestMapper {
         );
     }
 
+    public String normalizeEmail(String value) {
+        return normalizeRequired(value)
+                .toLowerCase(Locale.ROOT);
+    }
+
+    public String normalizePhone(String value) {
+        String requiredValue = normalizeRequired(value);
+        String normalized = requiredValue.replaceAll("\\D", "");
+
+        if (normalized.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Telephone number cannot be normalized."
+            );
+        }
+
+        return normalized;
+    }
+
+    public String normalizeOptionalPhone(String value) {
+        String optional = normalizeOptional(value);
+
+        if (optional == null) {
+            return null;
+        }
+
+        String normalized = optional.replaceAll("\\D", "");
+
+        return normalized.isBlank() ? null : normalized;
+    }
+
+    public String normalizeOptionalEmail(String value) {
+        String optional = normalizeOptional(value);
+
+        return optional == null
+                ? null
+                : optional.toLowerCase(Locale.ROOT);
+    }
+
+    public String normalizeCountryCode(String value) {
+        String optional = normalizeOptional(value);
+
+        return optional == null
+                ? "US"
+                : optional.toUpperCase(Locale.ROOT);
+    }
+
+    public String normalizeRequired(String value) {
+        if (value == null) {
+            throw new IllegalArgumentException(
+                    "Required booking value must not be null."
+            );
+        }
+
+        String normalized = value.trim();
+
+        if (normalized.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Required booking value must not be blank."
+            );
+        }
+
+        return normalized;
+    }
+
+    public String normalizeOptional(String value) {
+        if (value == null) {
+            return null;
+        }
+
+        String normalized = value.trim();
+
+        return normalized.isEmpty() ? null : normalized;
+    }
+
+    private boolean hasText(String value) {
+        return value != null && !value.trim().isEmpty();
+    }
+
     private void requirePublicRequest(
             BookingRequestCreateRequest request
     ) {
@@ -239,46 +397,5 @@ public class BookingRequestMapper {
                     "Administrator booking request must not be null."
             );
         }
-    }
-
-    private String normalizeEmail(
-            String value
-    ) {
-        return normalizeRequired(value)
-                .toLowerCase(Locale.ROOT);
-    }
-
-    private String normalizeRequired(
-            String value
-    ) {
-        if (value == null) {
-            throw new IllegalArgumentException(
-                    "Required booking value must not be null."
-            );
-        }
-
-        String normalizedValue = value.trim();
-
-        if (normalizedValue.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "Required booking value must not be blank."
-            );
-        }
-
-        return normalizedValue;
-    }
-
-    private String normalizeOptional(
-            String value
-    ) {
-        if (value == null) {
-            return null;
-        }
-
-        String normalizedValue = value.trim();
-
-        return normalizedValue.isEmpty()
-                ? null
-                : normalizedValue;
     }
 }

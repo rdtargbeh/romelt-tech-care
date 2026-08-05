@@ -9,6 +9,7 @@
  * Responsibilities:
  * - Shows the Romelt TechCare brand.
  * - Provides primary navigation links.
+ * - Provides direct navigation to public customer reviews.
  * - Provides a visible service-booking call to action.
  * - Supports mobile and desktop layouts.
  *
@@ -39,6 +40,10 @@ const navigationItems = [
   {
     label: "Pricing",
     path: "/pricing",
+  },
+  {
+    label: "Reviews",
+    path: "/reviews",
   },
   {
     label: "About",
@@ -72,9 +77,10 @@ export function Header() {
             <NavLink
               key={item.path}
               to={item.path}
+              end={item.path === "/"}
               className={({ isActive }) =>
                 [
-                  "rounded-lg px-4 py-2 text-base font-semibold transition",
+                  "rounded-lg px-3 py-2 text-base font-semibold transition xl:px-4",
                   isActive
                     ? "bg-white !text-[#0B2545]"
                     : "!text-[#F8FAFC] hover:bg-[#D4AF37] hover:!text-[#0B2545]",
@@ -102,6 +108,7 @@ export function Header() {
             isMobileMenuOpen ? "Close navigation menu" : "Open navigation menu"
           }
           aria-expanded={isMobileMenuOpen}
+          aria-controls="mobile-primary-navigation"
           onClick={() => setIsMobileMenuOpen((current) => !current)}
         >
           {isMobileMenuOpen ? (
@@ -113,7 +120,10 @@ export function Header() {
       </div>
 
       {isMobileMenuOpen ? (
-        <div className="border-t border-[#1565C0] bg-white px-4 py-4 lg:hidden">
+        <div
+          id="mobile-primary-navigation"
+          className="border-t border-[#1565C0] bg-white px-4 py-4 lg:hidden"
+        >
           <nav
             className="mx-auto flex max-w-7xl flex-col gap-2"
             aria-label="Mobile navigation"
@@ -122,6 +132,7 @@ export function Header() {
               <NavLink
                 key={item.path}
                 to={item.path}
+                end={item.path === "/"}
                 onClick={closeMobileMenu}
                 className={({ isActive }) =>
                   [

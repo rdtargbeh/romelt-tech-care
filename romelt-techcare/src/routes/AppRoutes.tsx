@@ -12,7 +12,7 @@
  * - Wraps public pages in the shared PublicLayout.
  * - Delegates every /admin/* URL to AdminRoutes.
  * - Keeps administrator pages outside the public website layout.
- * - Registers legal and accessibility pages.
+ * - Registers customer-review, legal, and accessibility pages.
  * - Provides a fallback page for unknown public routes.
  *
  * Routing structure:
@@ -24,6 +24,8 @@
  * /about
  * /book
  * /contact
+ * /reviews
+ * /reviews/submit
  * /privacy
  * /terms
  * /accessibility
@@ -34,10 +36,11 @@
  * Real-data integration:
  * - BookingPage connects to the public booking API.
  * - ContactPage connects to the public contact-inquiry API.
+ * - CustomerReviewsPage connects to approved public reviews and
+ *   rating-summary APIs.
+ * - CustomerReviewSubmissionPage submits invitation-based reviews.
  * - Administrator authentication and protected routes are managed
  *   by AdminRoutes and AdminAuthContext.
- * - Administrator Bookings, Contact Inquiries, Services, Settings,
- *   and Administrator Users must be registered inside AdminRoutes.
  * ================================================================
  */
 
@@ -49,6 +52,8 @@ import { AboutPage } from "@/pages/AboutPage";
 import { AccessibilityPage } from "@/pages/AccessibilityPage";
 import { BookingPage } from "@/pages/BookingPage";
 import { ContactPage } from "@/pages/ContactPage";
+import { CustomerReviewsPage } from "@/pages/CustomerReviewsPage";
+import { CustomerReviewSubmissionPage } from "@/pages/CustomerReviewSubmissionPage";
 import { HomePage } from "@/pages/HomePage";
 import { NotFoundPage } from "@/pages/NotFoundPage";
 import { PricingPage } from "@/pages/PricingPage";
@@ -76,6 +81,13 @@ export function AppRoutes() {
         <Route path="book" element={<BookingPage />} />
 
         <Route path="contact" element={<ContactPage />} />
+
+        <Route path="reviews" element={<CustomerReviewsPage />} />
+
+        <Route
+          path="reviews/submit"
+          element={<CustomerReviewSubmissionPage />}
+        />
 
         <Route path="privacy" element={<PrivacyPage />} />
 

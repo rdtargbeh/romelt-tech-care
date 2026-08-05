@@ -10,21 +10,10 @@ import java.util.UUID;
  * ================================================================
  * ROMELT TECHCARE — BOOKING REQUEST REPOSITORY
  * ================================================================
- *
- * Purpose:
- * Provides database operations for customer booking requests.
- *
- * Responsibilities:
- * - Persists public booking requests.
- * - Checks customer reference-number uniqueness.
- * - Supports future administrative booking management.
- * ================================================================
  */
 @Repository
 public interface BookingRequestRepository
         extends JpaRepository<BookingRequest, UUID> {
 
-    boolean existsByReferenceNumber(
-            String referenceNumber
-    );
+    boolean existsByReferenceNumber(String referenceNumber);
 }

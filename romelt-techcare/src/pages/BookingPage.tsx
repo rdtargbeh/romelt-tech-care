@@ -19,9 +19,18 @@
  * - Prevents duplicate submissions.
  * - Cancels an active request when the page unmounts.
  * - Displays the backend reference number after submission.
+ * - Explains the post-service customer-review invitation workflow.
  *
  * Real-data integration:
  * POST /api/v1/public/booking-requests
+ *
+ * Customer-review relationship:
+ * - Booking creates only a BookingRequest.
+ * - Booking does not create a CustomerReview.
+ * - Booking does not create a CustomerReviewInvitation.
+ * - After an eligible completed service, an administrator may send
+ *   a secure customer-review invitation.
+ * - The customer uses the private invitation link to submit a review.
  *
  * Important:
  * A submitted request is not a confirmed appointment. Romelt
@@ -44,9 +53,9 @@ import {
   CircleAlert,
   Clock3,
   Info,
-  Laptop,
   Mail,
   MapPin,
+  MessageSquareQuote,
   Phone,
   Send,
   ShieldCheck,
@@ -1317,13 +1326,62 @@ function BookingConfirmation({
         />
       </dl>
 
-      <button
-        type="button"
-        onClick={onReset}
-        className="focus-ring mt-6 inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-700 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-brand-800"
-      >
-        Submit Another Request
-      </button>
+      {!isDevelopmentFallback ? (
+        <section className="mx-auto mt-6 max-w-2xl rounded-2xl border border-[#B9D8F7] bg-[#EAF4FD] p-5 text-left">
+          <div className="flex items-start gap-4">
+            <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-white text-[#1976D2] shadow-sm">
+              <MessageSquareQuote className="size-5" aria-hidden="true" />
+            </div>
+
+            <div>
+              <h3 className="font-display text-base font-extrabold text-[#0B2545]">
+                Customer reviews happen after completed service
+              </h3>
+
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                This booking request does not create a customer review. After an
+                eligible service has been completed, Romelt TechCare may send a
+                secure review invitation to your email address.
+              </p>
+
+              <p className="mt-2 text-sm leading-6 text-slate-600">
+                The invitation will contain the private link required to submit
+                your rating and written feedback. Submitted reviews remain
+                pending until they are reviewed and approved for publication.
+              </p>
+
+              <p className="mt-2 text-xs font-semibold leading-5 text-slate-500">
+                The review submission page is not available through normal
+                website navigation because a valid invitation token is required.
+              </p>
+
+              <Link
+                to="/reviews"
+                className="focus-ring mt-4 inline-flex min-h-10 items-center justify-center rounded-lg bg-white px-4 py-2 text-sm font-extrabold !text-[#1976D2] shadow-sm transition hover:bg-[#F8FAFC] hover:!text-[#0B2545]"
+              >
+                Read Customer Reviews
+              </Link>
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <div className="mt-7 flex flex-col justify-center gap-3 sm:flex-row">
+        <Link
+          to="/reviews"
+          className="focus-ring inline-flex min-h-11 items-center justify-center rounded-xl border border-slate-300 bg-white px-6 py-2.5 text-sm font-bold !text-[#0B2545] transition hover:border-[#1976D2] hover:bg-[#EAF4FD] hover:!text-[#1976D2]"
+        >
+          View Customer Reviews
+        </Link>
+
+        <button
+          type="button"
+          onClick={onReset}
+          className="focus-ring inline-flex min-h-11 items-center justify-center rounded-xl bg-brand-700 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-brand-800"
+        >
+          Submit Another Request
+        </button>
+      </div>
     </div>
   );
 }

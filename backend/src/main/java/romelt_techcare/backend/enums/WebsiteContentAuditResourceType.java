@@ -55,5 +55,7 @@ public enum WebsiteContentAuditResourceType {
 
     ADMIN_USER,
 
+    CUSTOMER,
+
     OTHER
 }

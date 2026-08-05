@@ -10,6 +10,8 @@
  * Responsibilities:
  * - Reinforces the Romelt TechCare brand and service promise.
  * - Provides primary navigation and service links.
+ * - Provides direct access to public customer reviews.
+ * - Explains how verified customers submit reviews.
  * - Displays centralized business contact information.
  * - Displays service-area and appointment guidance.
  * - Provides links to legal and accessibility pages.
@@ -23,13 +25,19 @@
  *
  * Real-data integration:
  * Business identity, contact information, operating hours, service
- * areas, and availability are currently loaded from the centralized
- * business configuration. These settings may later come from the
- * Spring Boot backend through a public business-settings endpoint.
+ * areas, and availability are currently loaded from centralized
+ * configuration. These settings may later come from the backend.
  * ================================================================
  */
 
-import { ArrowUpRight, Clock3, Mail, MapPin, Phone } from "lucide-react";
+import {
+  ArrowUpRight,
+  Clock3,
+  Mail,
+  MapPin,
+  MessageSquareQuote,
+  Phone,
+} from "lucide-react";
 import { Link } from "react-router";
 
 import { BrandLogo } from "@/components/brand/BrandLogo";
@@ -92,13 +100,23 @@ export function Footer() {
               {businessConfig.tagline}
             </p>
 
-            <Link
-              to="/book"
-              className="focus-ring mt-6 inline-flex items-center gap-2 rounded-lg border border-[#D4AF37]/50 bg-[#D4AF37]/10 px-4 py-2.5 text-sm font-bold !text-white transition hover:border-[#D4AF37] hover:bg-[#D4AF37]/20 hover:!text-white"
-            >
-              Book a Service
-              <ArrowUpRight aria-hidden="true" className="h-4 w-4" />
-            </Link>
+            <div className="mt-6 flex flex-wrap gap-3">
+              <Link
+                to="/book"
+                className="focus-ring inline-flex items-center gap-2 rounded-lg border border-[#D4AF37]/50 bg-[#D4AF37]/10 px-4 py-2.5 text-sm font-bold !text-white transition hover:border-[#D4AF37] hover:bg-[#D4AF37]/20 hover:!text-white"
+              >
+                Book a Service
+                <ArrowUpRight aria-hidden="true" className="h-4 w-4" />
+              </Link>
+
+              <Link
+                to="/reviews"
+                className="focus-ring inline-flex items-center gap-2 rounded-lg border border-white/20 bg-white/5 px-4 py-2.5 text-sm font-bold !text-white transition hover:border-white/40 hover:bg-white/10 hover:!text-white"
+              >
+                Customer Reviews
+                <MessageSquareQuote aria-hidden="true" className="h-4 w-4" />
+              </Link>
+            </div>
           </div>
 
           <nav aria-labelledby="footer-explore-heading">
@@ -120,6 +138,15 @@ export function Footer() {
                   </Link>
                 </li>
               ))}
+
+              <li>
+                <Link
+                  to="/reviews"
+                  className="focus-ring inline-flex rounded-md text-sm !text-[#D6E3F0] transition hover:translate-x-0.5 hover:!text-white"
+                >
+                  Customer Reviews
+                </Link>
+              </li>
             </ul>
           </nav>
 
@@ -143,6 +170,18 @@ export function Footer() {
                 </li>
               ))}
             </ul>
+
+            <div className="mt-6 rounded-xl border border-[#D4AF37]/20 bg-white/5 p-4">
+              <p className="text-xs font-extrabold uppercase tracking-[0.14em] text-[#D4AF37]">
+                Share Your Experience
+              </p>
+
+              <p className="mt-2 text-xs leading-5 text-[#D6E3F0]">
+                Customers receive a secure review invitation after an eligible
+                completed service. The private invitation link opens the review
+                submission form.
+              </p>
+            </div>
           </nav>
 
           <section aria-labelledby="footer-contact-heading">
@@ -228,6 +267,13 @@ export function Footer() {
             aria-label="Legal navigation"
             className="flex flex-wrap gap-x-5 gap-y-2"
           >
+            <Link
+              to="/reviews"
+              className="focus-ring rounded-md !text-[#AFC3D7] transition hover:!text-white"
+            >
+              Reviews
+            </Link>
+
             <Link
               to="/privacy"
               className="focus-ring rounded-md !text-[#AFC3D7] transition hover:!text-white"

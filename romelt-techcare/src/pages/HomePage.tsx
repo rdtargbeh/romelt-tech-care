@@ -12,6 +12,7 @@
  * - Uses the temporary homepage hero image.
  * - Displays major service categories.
  * - Explains how the service process works.
+ * - Loads public customer-rating and featured-review content.
  * - Builds customer trust.
  * - Directs visitors toward booking or contacting the business.
  *
@@ -22,11 +23,13 @@
  * - Crimson Accent: #C62828
  *
  * Temporary hero asset:
- * public/image/image-2.jpg
+ * public/image/image-5.jpg
  *
  * Real-data integration:
- * Services, testimonials, promotions, service areas, availability,
- * business metrics, and pricing can later be loaded from the backend.
+ * - Featured customer reviews and rating summary are loaded from
+ *   the Spring Boot customer-review public APIs.
+ * - Services, promotions, service areas, availability, business
+ *   metrics, and pricing can later be loaded from the backend.
  * ================================================================
  */
 
@@ -48,6 +51,8 @@ import {
   Wrench,
 } from "lucide-react";
 import { Link } from "react-router";
+
+import { FeaturedCustomerReviewsSection } from "@/components/reviews/FeaturedCustomerReviewsSection";
 
 const services = [
   {
@@ -505,11 +510,15 @@ export function HomePage() {
       </section>
 
       {/* =========================================================
-    FINAL CTA — CUSTOMER SERVICE
-    ========================================================= */}
+          CUSTOMER REVIEWS AND RATINGS
+          ========================================================= */}
+      <FeaturedCustomerReviewsSection />
+
+      {/* =========================================================
+          FINAL CTA — CUSTOMER SERVICE
+          ========================================================= */}
       <section className="relative overflow-hidden bg-[#1976D2] text-white">
         <div className="grid min-h-[560px] lg:grid-cols-2">
-          {/* Customer service image */}
           <div className="relative min-h-[360px] overflow-hidden lg:min-h-full">
             <img
               src="/image/contact-1.jpg"
@@ -538,7 +547,6 @@ export function HomePage() {
             </div>
           </div>
 
-          {/* CTA content */}
           <div className="relative isolate flex items-center overflow-hidden px-4 py-16 sm:px-8 sm:py-20 lg:px-14 xl:px-20">
             <div
               aria-hidden="true"
