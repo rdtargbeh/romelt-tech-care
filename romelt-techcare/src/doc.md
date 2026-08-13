@@ -43,7 +43,7 @@ RGB: RGB(88, 170, 174)
 # Slightly Darker Shade (used in shadows)
 
 Hex: #4D9398
-RGB: RGB (77, 147, 152
+RGB: RGB (77, 147, 152)
 
 # Slightly Deeper Shade
 
@@ -54,3 +54,13 @@ RGB: RGB(43, 125, 130)
 
 #829C9E
 RGB(130, 156, 158)
+
+# google app password
+
+<!-- rdtargbeh -->
+
+name: rdt-pass: zycb agwl pkxf saos
+
+<!-- rdtargbeh2015 -->
+
+name: ronald: uryp gguk qnym emil

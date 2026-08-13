@@ -22,13 +22,5 @@ public enum NotificationResourceType {
 
     CUSTOMER,
 
-    ADMIN_USER,
-
-    WEBSITE_SERVICE,
-
-    NOTIFICATION,
-
-    SYSTEM,
-
-    OTHER
+    ADMIN_USER
 }

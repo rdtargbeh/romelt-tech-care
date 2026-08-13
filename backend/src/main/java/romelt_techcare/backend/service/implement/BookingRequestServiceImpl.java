@@ -3,6 +3,7 @@ package romelt_techcare.backend.service.implement;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
@@ -12,6 +13,7 @@ import romelt_techcare.backend.dto.AdminBookingRequestCreateRequest;
 import romelt_techcare.backend.dto.AdminBookingRequestResponse;
 import romelt_techcare.backend.dto.AdminBookingStatusUpdateRequest;
 import romelt_techcare.backend.dto.AdminJwtPrincipal;
+import romelt_techcare.backend.dto.BookingCustomerPrefillResponse;
 import romelt_techcare.backend.dto.BookingRequestConfirmationResponse;
 import romelt_techcare.backend.dto.BookingRequestCreateRequest;
 import romelt_techcare.backend.dto.CustomerResolutionResult;
@@ -25,9 +27,12 @@ import romelt_techcare.backend.enums.BookingSource;
 import romelt_techcare.backend.enums.ServiceMethod;
 import romelt_techcare.backend.enums.WebsiteContentAuditAction;
 import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
+import romelt_techcare.backend.event.BookingStatusChangedEvent;
+import romelt_techcare.backend.event.BookingSubmittedEvent;
 import romelt_techcare.backend.exception.AdminAuthenticationException;
 import romelt_techcare.backend.exception.PublicRequestRejectedException;
 import romelt_techcare.backend.mapper.BookingRequestMapper;
+import romelt_techcare.backend.mapper.CustomerMapper;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.BookingRequestRepository;
 import romelt_techcare.backend.repository.BookingRequestStatusHistoryRepository;
@@ -52,55 +57,86 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Processes public and administrator-created booking requests while
- * preserving the existing booking workflow and integrating reusable
- * customer records.
+ * Processes public and administrator-created booking requests,
+ * integrates reusable customer records, records booking history,
+ * creates audit records, and publishes after-commit booking
+ * notification events.
  *
  * Responsibilities:
  * - Creates public website booking requests.
  * - Creates administrator-entered booking requests.
- * - Resolves or creates customers from booking contact information.
- * - Supports administrator selection of an existing customer.
- * - Links every new booking to its resolved customer.
- * - Preserves booking contact and business snapshots.
+ * - Returns existing-customer information for Create Booking prefill.
+ * - Resolves or creates reusable customer records.
+ * - Supports explicit administrator selection of an existing Customer.
+ * - Links each booking to its customer.
+ * - Preserves contact-person and business snapshots.
+ * - Preserves the actual booking service-location snapshot.
  * - Validates personal and business booking requirements.
  * - Validates on-site service-location requirements.
- * - Generates unique customer-facing booking reference numbers.
- * - Retrieves administrator booking lists and booking details.
+ * - Generates unique customer-facing references.
+ * - Retrieves administrator booking lists and details.
  * - Updates booking lifecycle status.
- * - Automatically records initial and subsequent status history.
- * - Updates customer booking and service-completion activity.
+ * - Creates immutable status-history records.
+ * - Updates customer booking and completion activity.
  * - Records booking audit events.
+ * - Publishes booking events for after-commit customer and
+ *   administrator notifications.
  *
- * Customer creation paths:
+ * Existing-customer administrator workflow:
  *
- * PUBLIC BOOKING:
- * - CustomerService searches independently by normalized email and
- *   normalized telephone number.
- * - An existing matching customer is reused.
- * - A new customer is created only when neither value matches.
- * - If email and telephone match different customers, the transaction
- *   is rejected for administrator review.
+ * Administrator searches/selects Customer
+ *      -> customerId
+ *          -> getBookingCustomerPrefill(customerId)
+ *              -> frontend fills reusable customer information
+ *                  -> administrator enters booking-specific details
+ *                      -> createAdminBookingRequest(...)
  *
- * ADMIN BOOKING:
- * - An administrator may select an existing customer.
- * - When no customer is selected, the normal customer-resolution
- *   workflow is used.
- * - A selected customer must match the booking email and telephone
- *   identity when both values are available.
+ * Existing-customer authority rule:
  *
- * Business bookings:
- * - Customer represents the individual contact person.
- * - Business information remains a historical BookingRequest
- *   snapshot.
+ * If request.customerId() is supplied, the reusable Customer record
+ * is authoritative for:
+ *
+ * - customerId;
+ * - contact-person display name;
+ * - primary email;
+ * - primary telephone number;
+ * - preferred contact method, when configured.
+ *
+ * Service-location fields are NOT force-replaced from Customer because
+ * a repeat customer may request a service at another location.
+ *
+ * Business fields are NOT derived from Customer because Customer
+ * represents the reusable individual contact person while business
+ * information is intentionally a BookingRequest historical snapshot.
+ *
+ * Notification behavior:
+ *
+ * BOOKING CREATION:
+ * - Customer EMAIL acknowledgment when email exists.
+ * - Customer SMS acknowledgment when phone exists.
+ * - Administrator IN_APP notification for active administrators.
+ *
+ * STATUS CHANGE:
+ * - Customer EMAIL status update when email exists.
+ * - Customer SMS status update when phone exists.
+ * - Administrator IN_APP notification for active administrators.
+ *
+ * Notification sending:
+ * This service publishes Spring application events inside the active
+ * booking transaction. BookingNotificationListener processes them only
+ * after the transaction commits successfully.
  *
  * Status-history behavior:
- * - New booking: null → PENDING.
- * - Status update: previousStatus → requestedStatus.
+ * - New booking: null -> PENDING.
+ * - Status update: previousStatus -> requestedStatus.
+ * - The legacy notificationEventId remains null in the simplified
+ *   notification architecture.
  *
  * Transaction behavior:
  * Customer resolution, booking persistence, status history, customer
- * activity, and audit logging occur inside the same transaction.
+ * activity, audit logging, and application-event publication occur in
+ * the same transaction. External email and SMS delivery occurs after
+ * commit and cannot roll back a valid booking.
  *
  * Reference format:
  * RTBR-YYYY-XXXXXXXX
@@ -136,8 +172,14 @@ public class BookingRequestServiceImpl
     private final BookingRequestMapper
             bookingRequestMapper;
 
+    private final CustomerMapper
+            customerMapper;
+
     private final CustomerService
             customerService;
+
+    private final ApplicationEventPublisher
+            applicationEventPublisher;
 
     private final WebsiteContentAuditLogService
             websiteContentAuditLogService;
@@ -148,18 +190,29 @@ public class BookingRequestServiceImpl
     private final SecureRandom secureRandom =
             new SecureRandom();
 
+    // =================================================================
+    // PUBLIC BOOKING CREATE
+    // =================================================================
+
     /**
-     * Creates a public booking request.
+     * Creates a public website booking.
      *
-     * Customer resolution occurs before the booking is persisted.
-     * CustomerService assigns bookingRequest.customerId.
+     * The complete transaction:
+     * 1. Validates the booking.
+     * 2. Resolves or creates the customer.
+     * 3. Saves the booking.
+     * 4. Saves initial status history.
+     * 5. Records an audit entry.
+     * 6. Publishes an after-commit booking notification event.
      */
     @Override
     @Transactional
     public BookingRequestConfirmationResponse createBookingRequest(
             BookingRequestCreateRequest request
     ) {
-        requirePublicRequest(request);
+        requirePublicRequest(
+                request
+        );
 
         validateBookingRules(
                 request.bookingFor(),
@@ -204,7 +257,9 @@ public class BookingRequestServiceImpl
                 );
 
         saveInitialStatusHistory(
-                savedBookingRequest
+                savedBookingRequest,
+                null,
+                null
         );
 
         recordCreateAudit(
@@ -215,8 +270,14 @@ public class BookingRequestServiceImpl
                         : "Public booking request submitted and linked to an existing customer."
         );
 
+        applicationEventPublisher.publishEvent(
+                new BookingSubmittedEvent(
+                        savedBookingRequest
+                )
+        );
+
         log.info(
-                "Public booking created. bookingRequestId={}, referenceNumber={}, customerId={}, customerCreated={}, status={}, source={}",
+                "Public booking created and after-commit notification event published. bookingRequestId={}, referenceNumber={}, customerId={}, customerCreated={}, status={}, source={}",
                 savedBookingRequest.getBookingRequestId(),
                 savedBookingRequest.getReferenceNumber(),
                 savedBookingRequest.getCustomerId(),
@@ -231,11 +292,53 @@ public class BookingRequestServiceImpl
                 );
     }
 
+    // =================================================================
+    // ADMIN CUSTOMER PREFILL
+    // =================================================================
+
+    /**
+     * Returns current reusable Customer information needed by the
+     * administrator Create Booking form.
+     *
+     * The customer must:
+     * - exist;
+     * - be active/non-deleted according to repository rules;
+     * - not be merged;
+     * - be usable for new booking activity.
+     *
+     * No Customer or BookingRequest is modified.
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public BookingCustomerPrefillResponse getBookingCustomerPrefill(
+            UUID customerId
+    ) {
+        Customer customer =
+                findUsableBookingCustomer(
+                        customerId
+                );
+
+        return BookingCustomerPrefillResponse.from(
+                customer
+        );
+    }
+
+    // =================================================================
+    // ADMIN BOOKING CREATE
+    // =================================================================
+
     /**
      * Creates a booking entered by an authenticated administrator.
      *
-     * The administrator may select an existing customer or allow the
-     * customer-resolution service to resolve or create one.
+     * Existing Customer:
+     * If request.customerId() is supplied, the selected Customer is
+     * loaded and its current reusable contact identity is applied to
+     * the booking snapshot before persistence.
+     *
+     * New/Unselected Customer:
+     * If request.customerId() is null, the existing CustomerService
+     * resolution workflow may resolve an existing Customer from the
+     * supplied booking contact data or create a new Customer.
      */
     @Override
     @Transactional
@@ -243,8 +346,13 @@ public class BookingRequestServiceImpl
             AdminJwtPrincipal principal,
             AdminBookingRequestCreateRequest request
     ) {
-        requirePrincipal(principal);
-        requireAdminRequest(request);
+        requirePrincipal(
+                principal
+        );
+
+        requireAdminRequest(
+                request
+        );
 
         validateAdminBookingSource(
                 request.bookingSource()
@@ -315,12 +423,18 @@ public class BookingRequestServiceImpl
                 administrator.getAdminUserId(),
                 savedBookingRequest,
                 customerResolution.created()
-                        ? "Administrator created a booking and a new customer profile."
-                        : "Administrator created a booking linked to an existing customer."
+                        ? "Administrator created a booking, created a new customer profile, and queued notification events."
+                        : "Administrator created a booking linked to an existing customer and queued notification events."
+        );
+
+        applicationEventPublisher.publishEvent(
+                new BookingSubmittedEvent(
+                        savedBookingRequest
+                )
         );
 
         log.info(
-                "Administrator booking created. bookingRequestId={}, referenceNumber={}, customerId={}, customerCreated={}, source={}, createdByAdminUserId={}",
+                "Administrator booking created and after-commit notification event published. bookingRequestId={}, referenceNumber={}, customerId={}, customerCreated={}, source={}, createdByAdminUserId={}",
                 savedBookingRequest.getBookingRequestId(),
                 savedBookingRequest.getReferenceNumber(),
                 savedBookingRequest.getCustomerId(),
@@ -333,6 +447,10 @@ public class BookingRequestServiceImpl
                 savedBookingRequest
         );
     }
+
+    // =================================================================
+    // ADMIN BOOKING LIST
+    // =================================================================
 
     /**
      * Returns paginated administrator booking records.
@@ -349,11 +467,17 @@ public class BookingRequestServiceImpl
         }
 
         return bookingRequestRepository
-                .findAll(pageable)
+                .findAll(
+                        pageable
+                )
                 .map(
                         AdminBookingRequestResponse::from
                 );
     }
+
+    // =================================================================
+    // ADMIN BOOKING GET ONE
+    // =================================================================
 
     /**
      * Returns one administrator booking record.
@@ -373,14 +497,21 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // ADMIN BOOKING STATUS
+    // =================================================================
+
     /**
      * Updates a booking lifecycle status.
      *
-     * A status-history row is created automatically after the booking
-     * update succeeds.
-     *
-     * When a booking becomes COMPLETED, the linked customer's
-     * lastServiceCompletedAt and lastActivityAt fields are updated.
+     * The complete transaction:
+     * 1. Validates the administrator and status transition.
+     * 2. Applies lifecycle details.
+     * 3. Saves the booking status.
+     * 4. Saves status history.
+     * 5. Updates customer completion activity where applicable.
+     * 6. Records the audit event.
+     * 7. Publishes an after-commit booking notification event.
      */
     @Override
     @Transactional
@@ -389,8 +520,13 @@ public class BookingRequestServiceImpl
             UUID bookingRequestId,
             AdminBookingStatusUpdateRequest request
     ) {
-        requirePrincipal(principal);
-        requireBookingStatusUpdateRequest(request);
+        requirePrincipal(
+                principal
+        );
+
+        requireBookingStatusUpdateRequest(
+                request
+        );
 
         AdminUser administrator =
                 findAuthenticatedAdministrator(
@@ -413,10 +549,6 @@ public class BookingRequestServiceImpl
                 requestedStatus
         );
 
-        /*
-         * Capture the actual pre-update state before any booking field
-         * is modified.
-         */
         JsonNode beforeSnapshot =
                 createBookingSnapshot(
                         bookingRequest
@@ -442,7 +574,7 @@ public class BookingRequestServiceImpl
                         bookingRequest
                 );
 
-        String changeReason =
+        String historyChangeReason =
                 resolveStatusChangeReason(
                         request,
                         requestedStatus
@@ -452,7 +584,7 @@ public class BookingRequestServiceImpl
                 savedBookingRequest,
                 previousStatus,
                 requestedStatus,
-                changeReason,
+                historyChangeReason,
                 administrator
         );
 
@@ -486,8 +618,15 @@ public class BookingRequestServiceImpl
                 null
         );
 
+        applicationEventPublisher.publishEvent(
+                new BookingStatusChangedEvent(
+                        savedBookingRequest,
+                        previousStatus
+                )
+        );
+
         log.info(
-                "Booking status updated. bookingRequestId={}, referenceNumber={}, customerId={}, previousStatus={}, newStatus={}, changedByAdminUserId={}",
+                "Booking status updated and after-commit notification event published. bookingRequestId={}, referenceNumber={}, customerId={}, previousStatus={}, newStatus={}, changedByAdminUserId={}",
                 savedBookingRequest.getBookingRequestId(),
                 savedBookingRequest.getReferenceNumber(),
                 savedBookingRequest.getCustomerId(),
@@ -501,45 +640,40 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // ADMIN CUSTOMER RESOLUTION
+    // =================================================================
+
     /**
      * Resolves the reusable customer for an administrator-created
      * booking.
      *
-     * When no customer ID was selected, normal email/phone resolution
-     * is used.
+     * If no customerId is selected, the existing customer-resolution
+     * workflow may match or create a reusable customer from the booking
+     * snapshot.
+     *
+     * If customerId is selected, that Customer becomes authoritative
+     * for reusable contact identity.
+     *
+     * The booking retains its service-location and business snapshots
+     * because those can legitimately differ from the Customer profile.
      */
     private CustomerResolutionResult resolveAdminBookingCustomer(
             BookingRequest bookingRequest,
             UUID selectedCustomerId
     ) {
         if (selectedCustomerId == null) {
-            return customerService
-                    .resolveOrCreateFromBooking(
-                            bookingRequest
-                    );
-        }
-
-        Customer selectedCustomer =
-                customerRepository
-                        .findActiveRecordById(
-                                selectedCustomerId
-                        )
-                        .orElseThrow(
-                                () ->
-                                        new PublicRequestRejectedException(
-                                                HttpStatus.NOT_FOUND,
-                                                "The selected customer was not found."
-                                        )
-                        );
-
-        if (!selectedCustomer.isUsableCustomer()) {
-            reject(
-                    HttpStatus.CONFLICT,
-                    "The selected customer cannot be used for a new booking."
+            return customerService.resolveOrCreateFromBooking(
+                    bookingRequest
             );
         }
 
-        validateSelectedCustomerMatchesBooking(
+        Customer selectedCustomer =
+                findUsableBookingCustomer(
+                        selectedCustomerId
+                );
+
+        applySelectedCustomerContactSnapshot(
                 selectedCustomer,
                 bookingRequest
         );
@@ -566,66 +700,164 @@ public class BookingRequestServiceImpl
     }
 
     /**
-     * Validates that the selected customer does not conflict with the
-     * booking contact-person identity.
-     *
-     * A missing customer email or phone does not create a conflict.
-     * When both values exist, they must match.
+     * Loads one Customer that may be selected for a new booking.
      */
-    private void validateSelectedCustomerMatchesBooking(
+    private Customer findUsableBookingCustomer(
+            UUID customerId
+    ) {
+        if (customerId == null) {
+            reject(
+                    HttpStatus.BAD_REQUEST,
+                    "Customer ID is required."
+            );
+        }
+
+        Customer customer =
+                customerRepository
+                        .findActiveRecordById(
+                                customerId
+                        )
+                        .orElseThrow(
+                                () ->
+                                        new PublicRequestRejectedException(
+                                                HttpStatus.NOT_FOUND,
+                                                "The selected customer was not found."
+                                        )
+                        );
+
+        if (!customer.isUsableCustomer()) {
+            reject(
+                    HttpStatus.CONFLICT,
+                    "The selected customer cannot be used for a new booking."
+            );
+        }
+
+        return customer;
+    }
+
+    /**
+     * Copies authoritative reusable contact identity from the selected
+     * Customer into the BookingRequest snapshot.
+     *
+     * Customer-sourced:
+     * - customerId
+     * - fullName/displayName
+     * - primary email
+     * - normalized email
+     * - primary phone
+     * - normalized phone
+     * - preferred contact method when configured
+     *
+     * Intentionally not overwritten:
+     * - notification destinations;
+     * - business information;
+     * - service location;
+     * - service information;
+     * - schedule;
+     * - problem/device information;
+     * - administrator notes.
+     *
+     * A customer's saved address is a useful frontend default, but
+     * BookingRequest.streetAddress/... represent where this particular
+     * service will occur and therefore remain booking-specific.
+     */
+    private void applySelectedCustomerContactSnapshot(
             Customer customer,
             BookingRequest bookingRequest
     ) {
-        String customerEmail =
-                normalizeOptionalLowercase(
-                        customer.getNormalizedEmail()
+        if (customer == null) {
+            throw new IllegalArgumentException(
+                    "Customer is required."
+            );
+        }
+
+        if (bookingRequest == null) {
+            throw new IllegalArgumentException(
+                    "Booking request is required."
+            );
+        }
+
+        String customerName =
+                normalizeOptional(
+                        customer.getDisplayName()
                 );
 
-        String bookingEmail =
-                normalizeOptionalLowercase(
-                        bookingRequest.getNormalizedEmail()
+        String customerEmail =
+                normalizeOptional(
+                        customer.getPrimaryEmail()
                 );
 
         String customerPhone =
                 normalizeOptional(
-                        customer.getNormalizedPhone()
+                        customer.getPrimaryPhone()
                 );
 
-        String bookingPhone =
-                normalizeOptional(
-                        bookingRequest.getNormalizedPhone()
-                );
-
-        if (
-                customerEmail != null
-                        && bookingEmail != null
-                        && !customerEmail.equals(
-                        bookingEmail
-                )
-        ) {
+        if (customerName == null) {
             reject(
                     HttpStatus.CONFLICT,
-                    "The selected customer's email does not match the booking email."
+                    "The selected customer does not have a usable display name."
             );
         }
 
-        if (
-                customerPhone != null
-                        && bookingPhone != null
-                        && !customerPhone.equals(
-                        bookingPhone
-                )
-        ) {
+        if (customerEmail == null) {
             reject(
                     HttpStatus.CONFLICT,
-                    "The selected customer's telephone number does not match the booking telephone number."
+                    "The selected customer does not have a usable email address."
             );
         }
+
+        if (customerPhone == null) {
+            reject(
+                    HttpStatus.CONFLICT,
+                    "The selected customer does not have a usable telephone number."
+            );
+        }
+
+        bookingRequest.setFullName(
+                customerName
+        );
+
+        bookingRequest.setEmail(
+                customerEmail
+        );
+
+        bookingRequest.setNormalizedEmail(
+                customerMapper.normalizeOptionalEmail(
+                        customerEmail
+                )
+        );
+
+        bookingRequest.setPhone(
+                customerPhone
+        );
+
+        bookingRequest.setNormalizedPhone(
+                customerMapper.normalizeOptionalPhone(
+                        customerPhone
+                )
+        );
+
+        if (
+                customer.getPreferredContactMethod()
+                        != null
+        ) {
+            bookingRequest.setPreferredContactMethod(
+                    customer.getPreferredContactMethod()
+            );
+        }
+
+        bookingRequest.setCustomerId(
+                customer.getCustomerId()
+        );
     }
 
+    // =================================================================
+    // CUSTOMER LINK VALIDATION
+    // =================================================================
+
     /**
-     * Ensures customer resolution returned a persisted customer and
-     * assigned the same customer ID to the booking.
+     * Ensures that customer resolution linked the persisted customer
+     * to the booking.
      */
     private void requireResolvedCustomer(
             Customer customer,
@@ -655,8 +887,12 @@ public class BookingRequestServiceImpl
         }
     }
 
+    // =================================================================
+    // CUSTOMER COMPLETION ACTIVITY
+    // =================================================================
+
     /**
-     * Updates the linked customer when service work is completed.
+     * Updates the linked customer's service-completion activity.
      */
     private void updateCustomerServiceCompletionActivity(
             BookingRequest bookingRequest
@@ -700,9 +936,12 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // STATUS UPDATE DETAILS
+    // =================================================================
+
     /**
-     * Applies status-specific form fields before changing the booking
-     * status.
+     * Applies status-specific form fields.
      */
     private void applyStatusUpdateDetails(
             BookingRequest bookingRequest,
@@ -820,14 +1059,19 @@ public class BookingRequestServiceImpl
         }
     }
 
+    // =================================================================
+    // STATUS-SPECIFIC VALIDATION
+    // =================================================================
+
     /**
-     * Validates fields required by the requested lifecycle status.
+     * Validates fields required for the requested status.
      */
     private void validateStatusSpecificRequirements(
             BookingRequest bookingRequest,
             BookingRequestStatus requestedStatus
     ) {
         switch (requestedStatus) {
+
             case PENDING,
                  UNDER_REVIEW -> {
                 // No additional lifecycle fields are required.
@@ -913,8 +1157,12 @@ public class BookingRequestServiceImpl
         }
     }
 
+    // =================================================================
+    // CONFIRMED BOOKING VALIDATION
+    // =================================================================
+
     /**
-     * Validates the confirmed appointment window.
+     * Validates confirmed appointment scheduling.
      */
     private void validateConfirmedBooking(
             BookingRequest bookingRequest
@@ -944,11 +1192,9 @@ public class BookingRequestServiceImpl
             );
         }
 
-        if (
-                !scheduledEndAt.isAfter(
-                        scheduledStartAt
-                )
-        ) {
+        if (!scheduledEndAt.isAfter(
+                scheduledStartAt
+        )) {
             reject(
                     HttpStatus.BAD_REQUEST,
                     "Scheduled end time must be after the start time."
@@ -962,6 +1208,10 @@ public class BookingRequestServiceImpl
             );
         }
     }
+
+    // =================================================================
+    // STATUS TRANSITIONS
+    // =================================================================
 
     /**
      * Enforces supported lifecycle transitions.
@@ -993,6 +1243,7 @@ public class BookingRequestServiceImpl
 
         boolean allowed =
                 switch (currentStatus) {
+
                     case PENDING ->
                             requestedStatus
                                     == BookingRequestStatus.UNDER_REVIEW
@@ -1039,6 +1290,10 @@ public class BookingRequestServiceImpl
         }
     }
 
+    // =================================================================
+    // BOOKING BUSINESS VALIDATION
+    // =================================================================
+
     /**
      * Validates public and administrator booking data.
      */
@@ -1067,6 +1322,7 @@ public class BookingRequestServiceImpl
         }
 
         if (bookingFor == BookingFor.BUSINESS) {
+
             requireBookingValue(
                     businessName,
                     "Business name is required."
@@ -1101,7 +1357,9 @@ public class BookingRequestServiceImpl
                     businessPostalCode,
                     "Business postal code is required."
             );
+
         } else {
+
             validatePersonalBookingHasNoBusinessDetails(
                     businessName,
                     businessEmail,
@@ -1140,6 +1398,7 @@ public class BookingRequestServiceImpl
         }
 
         if (serviceMethod == ServiceMethod.ON_SITE) {
+
             requireBookingValue(
                     streetAddress,
                     "Street address is required for on-site service."
@@ -1163,7 +1422,7 @@ public class BookingRequestServiceImpl
     }
 
     /**
-     * Prevents business data from being stored on a personal booking.
+     * Prevents business data on personal bookings.
      */
     private void validatePersonalBookingHasNoBusinessDetails(
             String businessName,
@@ -1175,13 +1434,27 @@ public class BookingRequestServiceImpl
             String businessPostalCode
     ) {
         if (
-                !isBlank(businessName)
-                        || !isBlank(businessEmail)
-                        || !isBlank(businessPhone)
-                        || !isBlank(businessStreetAddress)
-                        || !isBlank(businessCity)
-                        || !isBlank(businessState)
-                        || !isBlank(businessPostalCode)
+                !isBlank(
+                        businessName
+                )
+                        || !isBlank(
+                        businessEmail
+                )
+                        || !isBlank(
+                        businessPhone
+                )
+                        || !isBlank(
+                        businessStreetAddress
+                )
+                        || !isBlank(
+                        businessCity
+                )
+                        || !isBlank(
+                        businessState
+                )
+                        || !isBlank(
+                        businessPostalCode
+                )
         ) {
             reject(
                     HttpStatus.BAD_REQUEST,
@@ -1190,21 +1463,12 @@ public class BookingRequestServiceImpl
         }
     }
 
-    /**
-     * Saves initial public booking status history.
-     */
-    private void saveInitialStatusHistory(
-            BookingRequest bookingRequest
-    ) {
-        saveInitialStatusHistory(
-                bookingRequest,
-                null,
-                null
-        );
-    }
+    // =================================================================
+    // INITIAL STATUS HISTORY
+    // =================================================================
 
     /**
-     * Saves the initial null-to-PENDING status transition.
+     * Saves the initial null-to-PENDING history row.
      */
     private void saveInitialStatusHistory(
             BookingRequest bookingRequest,
@@ -1213,8 +1477,11 @@ public class BookingRequestServiceImpl
     ) {
         if (
                 bookingRequest == null
-                        || bookingRequest.getBookingRequestId() == null
-                        || bookingRequest.getStatus() == null
+                        || bookingRequest
+                        .getBookingRequestId()
+                        == null
+                        || bookingRequest.getStatus()
+                        == null
         ) {
             throw new IllegalArgumentException(
                     "A persisted booking request with a status is required before creating status history."
@@ -1222,12 +1489,15 @@ public class BookingRequestServiceImpl
         }
 
         BookingRequestStatusHistory history =
-                BookingRequestStatusHistory.builder()
+                BookingRequestStatusHistory
+                        .builder()
                         .bookingRequestId(
                                 bookingRequest
                                         .getBookingRequestId()
                         )
-                        .previousStatus(null)
+                        .previousStatus(
+                                null
+                        )
                         .newStatus(
                                 bookingRequest.getStatus()
                         )
@@ -1242,7 +1512,9 @@ public class BookingRequestServiceImpl
                                         administratorName
                                 )
                         )
-                        .notificationEventId(null)
+                        .notificationEventId(
+                                null
+                        )
                         .build();
 
         BookingRequestStatusHistory savedHistory =
@@ -1259,8 +1531,12 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // STATUS HISTORY
+    // =================================================================
+
     /**
-     * Saves one immutable status-history record.
+     * Saves an immutable booking status-transition history row.
      */
     private void saveStatusHistory(
             BookingRequest bookingRequest,
@@ -1271,7 +1547,9 @@ public class BookingRequestServiceImpl
     ) {
         if (
                 bookingRequest == null
-                        || bookingRequest.getBookingRequestId() == null
+                        || bookingRequest
+                        .getBookingRequestId()
+                        == null
         ) {
             throw new IllegalArgumentException(
                     "A persisted booking request is required before creating status history."
@@ -1298,7 +1576,9 @@ public class BookingRequestServiceImpl
 
         if (
                 administrator == null
-                        || administrator.getAdminUserId() == null
+                        || administrator
+                        .getAdminUserId()
+                        == null
         ) {
             throw new IllegalArgumentException(
                     "Administrator information is required for a booking status change."
@@ -1306,7 +1586,8 @@ public class BookingRequestServiceImpl
         }
 
         BookingRequestStatusHistory history =
-                BookingRequestStatusHistory.builder()
+                BookingRequestStatusHistory
+                        .builder()
                         .bookingRequestId(
                                 bookingRequest
                                         .getBookingRequestId()
@@ -1330,7 +1611,9 @@ public class BookingRequestServiceImpl
                                         administrator
                                 )
                         )
-                        .notificationEventId(null)
+                        .notificationEventId(
+                                null
+                        )
                         .build();
 
         BookingRequestStatusHistory savedHistory =
@@ -1349,8 +1632,15 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // STATUS CHANGE REASON
+    // =================================================================
+
     /**
-     * Resolves a readable status-history reason.
+     * Resolves the internal history and audit reason.
+     *
+     * This value may contain administrator-entered operational
+     * language. It is not automatically sent to the customer.
      */
     private String resolveStatusChangeReason(
             AdminBookingStatusUpdateRequest request,
@@ -1366,6 +1656,7 @@ public class BookingRequestServiceImpl
         }
 
         return switch (requestedStatus) {
+
             case CANCELLED ->
                     normalizeOptional(
                             request.cancellationReason()
@@ -1397,6 +1688,10 @@ public class BookingRequestServiceImpl
         };
     }
 
+    // =================================================================
+    // CREATE AUDIT
+    // =================================================================
+
     /**
      * Records booking creation in the audit log.
      */
@@ -1419,6 +1714,10 @@ public class BookingRequestServiceImpl
                 null
         );
     }
+
+    // =================================================================
+    // AUDIT SNAPSHOT
+    // =================================================================
 
     /**
      * Creates a non-sensitive booking audit snapshot.
@@ -1555,6 +1854,10 @@ public class BookingRequestServiceImpl
                 );
     }
 
+    // =================================================================
+    // BOOKING LOOKUP
+    // =================================================================
+
     /**
      * Finds one booking request.
      */
@@ -1581,6 +1884,10 @@ public class BookingRequestServiceImpl
                 );
     }
 
+    // =================================================================
+    // ADMINISTRATOR LOOKUP
+    // =================================================================
+
     /**
      * Finds and validates the authenticated administrator.
      */
@@ -1598,7 +1905,8 @@ public class BookingRequestServiceImpl
                         );
 
         if (
-                administrator.getAdminUserId() == null
+                administrator.getAdminUserId()
+                        == null
                         || !administrator
                         .getAdminUserId()
                         .equals(
@@ -1610,8 +1918,10 @@ public class BookingRequestServiceImpl
         }
 
         if (
-                administrator.getEmail() == null
-                        || principal.email() == null
+                administrator.getEmail()
+                        == null
+                        || principal.email()
+                        == null
                         || !administrator
                         .getEmail()
                         .trim()
@@ -1624,8 +1934,10 @@ public class BookingRequestServiceImpl
         }
 
         if (
-                administrator.getRole() == null
-                        || principal.role() == null
+                administrator.getRole()
+                        == null
+                        || principal.role()
+                        == null
                         || administrator.getRole()
                         != principal.role()
         ) {
@@ -1641,9 +1953,12 @@ public class BookingRequestServiceImpl
         return administrator;
     }
 
+    // =================================================================
+    // ADMIN BOOKING SOURCE
+    // =================================================================
+
     /**
-     * Prevents administrator-created bookings from using the public
-     * WEBSITE source.
+     * Prevents administrator bookings from using WEBSITE source.
      */
     private void validateAdminBookingSource(
             BookingSource bookingSource
@@ -1663,6 +1978,10 @@ public class BookingRequestServiceImpl
         }
     }
 
+    // =================================================================
+    // CUSTOMER BOOKING ACTIVITY TIME
+    // =================================================================
+
     /**
      * Returns the timestamp used for customer booking activity.
      */
@@ -1679,6 +1998,10 @@ public class BookingRequestServiceImpl
 
         return Instant.now();
     }
+
+    // =================================================================
+    // BOOKING REFERENCE
+    // =================================================================
 
     /**
      * Generates a unique customer-facing booking reference.
@@ -1745,6 +2068,10 @@ public class BookingRequestServiceImpl
         );
     }
 
+    // =================================================================
+    // ADMINISTRATOR DISPLAY NAME
+    // =================================================================
+
     /**
      * Creates a readable administrator-name snapshot.
      */
@@ -1777,11 +2104,9 @@ public class BookingRequestServiceImpl
             return fullName;
         }
 
-        if (
-                !isBlank(
-                        administrator.getEmail()
-                )
-        ) {
+        if (!isBlank(
+                administrator.getEmail()
+        )) {
             return administrator
                     .getEmail()
                     .trim();
@@ -1789,6 +2114,10 @@ public class BookingRequestServiceImpl
 
         return "Administrator";
     }
+
+    // =================================================================
+    // REQUEST VALIDATION
+    // =================================================================
 
     private void requirePublicRequest(
             BookingRequestCreateRequest request
@@ -1817,7 +2146,8 @@ public class BookingRequestServiceImpl
     ) {
         if (
                 request == null
-                        || request.status() == null
+                        || request.status()
+                        == null
         ) {
             reject(
                     HttpStatus.BAD_REQUEST,
@@ -1831,11 +2161,13 @@ public class BookingRequestServiceImpl
     ) {
         if (
                 principal == null
-                        || principal.adminUserId() == null
+                        || principal.adminUserId()
+                        == null
                         || isBlank(
                         principal.email()
                 )
-                        || principal.role() == null
+                        || principal.role()
+                        == null
         ) {
             throw AdminAuthenticationException
                     .staleAuthentication();
@@ -1846,13 +2178,19 @@ public class BookingRequestServiceImpl
             String value,
             String message
     ) {
-        if (isBlank(value)) {
+        if (isBlank(
+                value
+        )) {
             reject(
                     HttpStatus.BAD_REQUEST,
                     message
             );
         }
     }
+
+    // =================================================================
+    // ERROR
+    // =================================================================
 
     private void reject(
             HttpStatus status,
@@ -1864,20 +2202,9 @@ public class BookingRequestServiceImpl
         );
     }
 
-    private String normalizeOptionalLowercase(
-            String value
-    ) {
-        String normalizedValue =
-                normalizeOptional(
-                        value
-                );
-
-        return normalizedValue == null
-                ? null
-                : normalizedValue.toLowerCase(
-                Locale.ROOT
-        );
-    }
+    // =================================================================
+    // NORMALIZATION
+    // =================================================================
 
     private String normalizeOptional(
             String value

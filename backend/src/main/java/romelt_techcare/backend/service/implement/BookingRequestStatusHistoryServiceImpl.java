@@ -37,14 +37,11 @@ import java.util.UUID;
  */
 @Service
 @RequiredArgsConstructor
-public class BookingRequestStatusHistoryServiceImpl
-        implements BookingRequestStatusHistoryService {
+public class BookingRequestStatusHistoryServiceImpl implements BookingRequestStatusHistoryService {
 
-    private final BookingRequestRepository
-            bookingRequestRepository;
+    private final BookingRequestRepository bookingRequestRepository;
 
-    private final BookingRequestStatusHistoryRepository
-            bookingRequestStatusHistoryRepository;
+    private final BookingRequestStatusHistoryRepository bookingRequestStatusHistoryRepository;
 
     private final BookingRequestStatusHistoryMapper
             bookingRequestStatusHistoryMapper;

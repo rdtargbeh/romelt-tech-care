@@ -9,14 +9,16 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
+import romelt_techcare.backend.dto.CustomerReviewEligibleBookingResponse;
 import romelt_techcare.backend.dto.CustomerReviewRatingSummaryResponse;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.BookingRequest;
-import romelt_techcare.backend.entity.ContactInquiry;
+import romelt_techcare.backend.entity.Customer;
 import romelt_techcare.backend.entity.CustomerReview;
 import romelt_techcare.backend.entity.CustomerReviewInvitation;
 import romelt_techcare.backend.entity.WebsiteMediaAsset;
 import romelt_techcare.backend.entity.WebsiteService;
+import romelt_techcare.backend.enums.BookingRequestStatus;
 import romelt_techcare.backend.enums.CustomerReviewDisplayPreference;
 import romelt_techcare.backend.enums.CustomerReviewModerationStatus;
 import romelt_techcare.backend.enums.CustomerReviewSource;
@@ -24,7 +26,8 @@ import romelt_techcare.backend.enums.WebsiteContentAuditAction;
 import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
 import romelt_techcare.backend.repository.AdminUserRepository;
 import romelt_techcare.backend.repository.BookingRequestRepository;
-import romelt_techcare.backend.repository.ContactInquiryRepository;
+import romelt_techcare.backend.repository.CustomerRepository;
+import romelt_techcare.backend.repository.CustomerReviewEligibleBookingRepository;
 import romelt_techcare.backend.repository.CustomerReviewRepository;
 import romelt_techcare.backend.repository.WebsiteMediaAssetRepository;
 import romelt_techcare.backend.repository.WebsiteServiceRepository;
@@ -48,9 +51,17 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Implements verified review submission, administrator review entry,
- * moderation, publication, public display, rating aggregation, and
- * immutable audit logging.
+ * Implements service-based customer-review submission, administrator
+ * review entry, moderation, publication, public display, rating
+ * aggregation, and immutable audit logging.
+ *
+ * Core business rule:
+ * A Romelt TechCare customer review represents feedback about an
+ * actual completed, review-eligible BookingRequest.
+ *
+ * Customer identity and WebsiteService identity are derived from the
+ * completed booking and reusable Customer record. Browser-supplied
+ * contact or service identity is never authoritative.
  *
  * Verified-submission transaction:
  * 1. Validates and locks the invitation token.
@@ -76,14 +87,17 @@ public class CustomerReviewServiceImplementation
     private final CustomerReviewRepository
             customerReviewRepository;
 
+    private final CustomerReviewEligibleBookingRepository
+            customerReviewEligibleBookingRepository;
+
     private final CustomerReviewInvitationService
             customerReviewInvitationService;
 
     private final BookingRequestRepository
             bookingRequestRepository;
 
-    private final ContactInquiryRepository
-            contactInquiryRepository;
+    private final CustomerRepository
+            customerRepository;
 
     private final WebsiteServiceRepository
             websiteServiceRepository;
@@ -100,12 +114,15 @@ public class CustomerReviewServiceImplementation
     private final WebsiteContentAuditSnapshotService
             websiteContentAuditSnapshotService;
 
+    // =================================================================
+    // VERIFIED PUBLIC SUBMISSION
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview submitVerifiedReview(
             String invitationToken,
             CustomerReview requestedReview,
-            UUID serviceId,
             UUID customerPhotoMediaId,
             String consentVersion,
             String submissionIpAddress,
@@ -149,6 +166,10 @@ public class CustomerReviewServiceImplementation
             );
         }
 
+        requireReviewEligibleCompletedBooking(
+                bookingRequest
+        );
+
         if (
                 customerReviewRepository
                         .existsByReviewInvitation_ReviewInvitationId(
@@ -172,8 +193,15 @@ public class CustomerReviewServiceImplementation
             );
         }
 
+        Customer customer =
+                getRequiredBookingCustomer(
+                        bookingRequest
+                );
+
         WebsiteService websiteService =
-                getOptionalWebsiteService(serviceId);
+                getRequiredBookingWebsiteService(
+                        bookingRequest
+                );
 
         WebsiteMediaAsset customerPhoto =
                 getOptionalPublicMediaAsset(
@@ -181,9 +209,9 @@ public class CustomerReviewServiceImplementation
                 );
 
         String displayName =
-                resolveSubmittedDisplayName(
+                resolveDisplayNameFromCustomer(
                         requestedReview,
-                        bookingRequest
+                        customer
                 );
 
         CustomerReview review =
@@ -197,7 +225,14 @@ public class CustomerReviewServiceImplementation
                                         .getReviewerDisplayPreference()
                         )
                         .reviewerEmail(
-                                invitation.getCustomerEmail()
+                                normalizeOptional(
+                                        customer.getPrimaryEmail()
+                                )
+                        )
+                        .reviewerPhone(
+                                normalizeOptional(
+                                        customer.getPrimaryPhone()
+                                )
                         )
                         .reviewTitle(
                                 normalizeOptional(
@@ -211,12 +246,16 @@ public class CustomerReviewServiceImplementation
                                         "Review text"
                                 )
                         )
-                        .rating(requestedReview.getRating())
+                        .rating(
+                                requestedReview.getRating()
+                        )
                         .reviewSource(
                                 CustomerReviewSource
                                         .BOOKING_FOLLOW_UP
                         )
-                        .customerPhotoMedia(customerPhoto)
+                        .customerPhotoMedia(
+                                customerPhoto
+                        )
                         .isVerifiedCustomer(true)
                         .customerConsentConfirmed(true)
                         .customerConsentConfirmedAt(
@@ -231,8 +270,7 @@ public class CustomerReviewServiceImplementation
                                 )
                         )
                         .moderationStatus(
-                                CustomerReviewModerationStatus
-                                        .PENDING
+                                CustomerReviewModerationStatus.PENDING
                         )
                         .isPublic(false)
                         .isFeatured(false)
@@ -248,7 +286,9 @@ public class CustomerReviewServiceImplementation
                                 )
                         )
                         .isSpam(false)
-                        .submittedAt(Instant.now())
+                        .submittedAt(
+                                Instant.now()
+                        )
                         .build();
 
         CustomerReview savedReview =
@@ -259,16 +299,22 @@ public class CustomerReviewServiceImplementation
                 );
 
         customerReviewInvitationService
-                .consumeInvitation(invitationToken);
+                .consumeInvitation(
+                        invitationToken
+                );
 
         websiteContentAuditLogService.recordAudit(
                 null,
                 WebsiteContentAuditAction.CREATE,
                 WebsiteContentAuditResourceType.CUSTOMER_REVIEW,
                 savedReview.getCustomerReviewId(),
-                createReviewResourceName(savedReview),
+                createReviewResourceName(
+                        savedReview
+                ),
                 null,
-                createReviewSnapshot(savedReview),
+                createReviewSnapshot(
+                        savedReview
+                ),
                 "Verified customer review submitted and queued for moderation.",
                 null
         );
@@ -278,13 +324,15 @@ public class CustomerReviewServiceImplementation
         );
     }
 
+    // =================================================================
+    // ADMIN CREATE
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview createReviewByAdministrator(
             CustomerReview requestedReview,
             UUID bookingRequestId,
-            UUID contactInquiryId,
-            UUID serviceId,
             UUID customerPhotoMediaId,
             UUID administratorId
     ) {
@@ -294,36 +342,58 @@ public class CustomerReviewServiceImplementation
             );
         }
 
-        validateReviewContent(requestedReview);
-
-        AdminUser administrator =
-                getRequiredAdministrator(administratorId);
-
-        BookingRequest bookingRequest =
-                getOptionalBookingRequest(bookingRequestId);
-
-        ContactInquiry contactInquiry =
-                getOptionalContactInquiry(contactInquiryId);
-
-        WebsiteService websiteService =
-                getOptionalWebsiteService(serviceId);
-
-        WebsiteMediaAsset customerPhoto =
-                getOptionalPublicMediaAsset(
-                        customerPhotoMediaId
-                );
+        validateReviewContent(
+                requestedReview
+        );
 
         if (
-                bookingRequest != null
-                        && customerReviewRepository
+                requestedReview.getReviewSource()
+                        == null
+        ) {
+            throw badRequest(
+                    "Review source is required."
+            );
+        }
+
+        AdminUser administrator =
+                getRequiredAdministrator(
+                        administratorId
+                );
+
+        BookingRequest bookingRequest =
+                getRequiredBookingRequest(
+                        bookingRequestId
+                );
+
+        requireReviewEligibleCompletedBooking(
+                bookingRequest
+        );
+
+        if (
+                customerReviewRepository
                         .existsByBookingRequest_BookingRequestId(
                                 bookingRequest.getBookingRequestId()
                         )
         ) {
             throw conflict(
-                    "A review already exists for this booking."
+                    "A review already exists for this completed service."
             );
         }
+
+        Customer customer =
+                getRequiredBookingCustomer(
+                        bookingRequest
+                );
+
+        WebsiteService websiteService =
+                getRequiredBookingWebsiteService(
+                        bookingRequest
+                );
+
+        WebsiteMediaAsset customerPhoto =
+                getOptionalPublicMediaAsset(
+                        customerPhotoMediaId
+                );
 
         boolean consentConfirmed =
                 Boolean.TRUE.equals(
@@ -331,46 +401,66 @@ public class CustomerReviewServiceImplementation
                                 .getCustomerConsentConfirmed()
                 );
 
+        String displayName =
+                resolveDisplayNameFromCustomer(
+                        requestedReview,
+                        customer
+                );
+
         CustomerReview review =
                 CustomerReview.builder()
-                        .bookingRequest(bookingRequest)
-                        .contactInquiry(contactInquiry)
-                        .websiteService(websiteService)
+                        .bookingRequest(
+                                bookingRequest
+                        )
+                        .websiteService(
+                                websiteService
+                        )
                         .reviewerDisplayName(
-                                requestedReview
-                                        .getReviewerDisplayName()
+                                displayName
                         )
                         .reviewerDisplayPreference(
                                 requestedReview
                                         .getReviewerDisplayPreference()
                         )
                         .reviewerEmail(
-                                requestedReview.getReviewerEmail()
+                                normalizeOptional(
+                                        customer.getPrimaryEmail()
+                                )
                         )
                         .reviewerPhone(
-                                requestedReview.getReviewerPhone()
+                                normalizeOptional(
+                                        customer.getPrimaryPhone()
+                                )
                         )
                         .reviewTitle(
-                                requestedReview.getReviewTitle()
+                                normalizeOptional(
+                                        requestedReview
+                                                .getReviewTitle()
+                                )
                         )
                         .reviewText(
-                                requestedReview.getReviewText()
+                                normalizeRequired(
+                                        requestedReview
+                                                .getReviewText(),
+                                        "Review text"
+                                )
                         )
-                        .rating(requestedReview.getRating())
+                        .rating(
+                                requestedReview.getRating()
+                        )
                         .reviewSource(
                                 requestedReview.getReviewSource()
                         )
                         .externalSourceUrl(
-                                requestedReview
-                                        .getExternalSourceUrl()
-                        )
-                        .customerPhotoMedia(customerPhoto)
-                        .isVerifiedCustomer(
-                                Boolean.TRUE.equals(
+                                normalizeOptional(
                                         requestedReview
-                                                .getIsVerifiedCustomer()
+                                                .getExternalSourceUrl()
                                 )
                         )
+                        .customerPhotoMedia(
+                                customerPhoto
+                        )
+                        .isVerifiedCustomer(true)
                         .customerConsentConfirmed(
                                 consentConfirmed
                         )
@@ -389,15 +479,20 @@ public class CustomerReviewServiceImplementation
                                         : null
                         )
                         .moderationStatus(
-                                CustomerReviewModerationStatus
-                                        .PENDING
+                                CustomerReviewModerationStatus.PENDING
                         )
                         .isPublic(false)
                         .isFeatured(false)
                         .isSpam(false)
-                        .submittedAt(Instant.now())
-                        .createdByAdminUser(administrator)
-                        .updatedByAdminUser(administrator)
+                        .submittedAt(
+                                Instant.now()
+                        )
+                        .createdByAdminUser(
+                                administrator
+                        )
+                        .updatedByAdminUser(
+                                administrator
+                        )
                         .build();
 
         CustomerReview savedReview =
@@ -411,22 +506,31 @@ public class CustomerReviewServiceImplementation
                 WebsiteContentAuditAction.CREATE,
                 WebsiteContentAuditResourceType.CUSTOMER_REVIEW,
                 savedReview.getCustomerReviewId(),
-                createReviewResourceName(savedReview),
+                createReviewResourceName(
+                        savedReview
+                ),
                 null,
-                createReviewSnapshot(savedReview),
-                "Administrator created a customer review.",
+                createReviewSnapshot(
+                        savedReview
+                ),
+                "Administrator created a review for a completed customer service.",
                 null
         );
 
-        return savedReview;
+        return getReview(
+                savedReview.getCustomerReviewId()
+        );
     }
+
+    // =================================================================
+    // UPDATE
+    // =================================================================
 
     @Override
     @Transactional
     public CustomerReview updateReview(
             UUID customerReviewId,
             CustomerReview requestedUpdate,
-            UUID serviceId,
             UUID customerPhotoMediaId,
             UUID administratorId
     ) {
@@ -436,50 +540,113 @@ public class CustomerReviewServiceImplementation
             );
         }
 
-        validateReviewContent(requestedUpdate);
+        validateReviewContent(
+                requestedUpdate
+        );
+
+        if (
+                requestedUpdate.getReviewSource()
+                        == null
+        ) {
+            throw badRequest(
+                    "Review source is required."
+            );
+        }
 
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview existingReview =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
+
+        BookingRequest bookingRequest =
+                existingReview.getBookingRequest();
+
+        if (bookingRequest == null) {
+            throw conflict(
+                    "Customer review is not associated with a completed booking."
+            );
+        }
+
+        requireReviewEligibleCompletedBooking(
+                bookingRequest
+        );
+
+        /*
+         * Defensive integrity check:
+         * the service stored on the review must still be the same
+         * service identified by its authoritative completed booking.
+         */
+        requireReviewServiceMatchesBooking(
+                existingReview,
+                bookingRequest
+        );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(existingReview);
-
-        WebsiteService websiteService =
-                getOptionalWebsiteService(serviceId);
+                createReviewSnapshot(
+                        existingReview
+                );
 
         WebsiteMediaAsset customerPhoto =
                 getOptionalPublicMediaAsset(
                         customerPhotoMediaId
                 );
 
+        String displayName =
+                resolveUpdatedDisplayName(
+                        requestedUpdate,
+                        existingReview
+                );
+
         try {
             existingReview.updateContent(
-                    requestedUpdate
-                            .getReviewerDisplayName(),
+                    displayName,
+
                     requestedUpdate
                             .getReviewerDisplayPreference(),
-                    requestedUpdate.getReviewerEmail(),
-                    requestedUpdate.getReviewerPhone(),
-                    requestedUpdate.getReviewTitle(),
-                    requestedUpdate.getReviewText(),
+
+                    normalizeOptional(
+                            requestedUpdate
+                                    .getReviewTitle()
+                    ),
+
+                    normalizeRequired(
+                            requestedUpdate
+                                    .getReviewText(),
+                            "Review text"
+                    ),
+
                     requestedUpdate.getRating(),
+
                     requestedUpdate.getReviewSource(),
-                    requestedUpdate
-                            .getExternalSourceUrl(),
-                    websiteService,
+
+                    normalizeOptional(
+                            requestedUpdate
+                                    .getExternalSourceUrl()
+                    ),
+
                     customerPhoto,
+
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(existingReview);
+                        .saveAndFlush(
+                                existingReview
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -489,8 +656,14 @@ public class CustomerReviewServiceImplementation
                 "Customer review content updated."
         );
 
-        return savedReview;
+        return getReview(
+                savedReview.getCustomerReviewId()
+        );
     }
+
+    // =================================================================
+    // GET ONE
+    // =================================================================
 
     @Override
     public CustomerReview getReview(
@@ -502,11 +675,97 @@ public class CustomerReviewServiceImplementation
         );
 
         return customerReviewRepository
-                .findByCustomerReviewId(customerReviewId)
-                .orElseThrow(() -> notFound(
-                        "Customer review was not found."
-                ));
+                .findByCustomerReviewId(
+                        customerReviewId
+                )
+                .orElseThrow(
+                        () -> notFound(
+                                "Customer review was not found."
+                        )
+                );
     }
+
+    // =================================================================
+// ELIGIBLE COMPLETED BOOKINGS
+// =================================================================
+
+    @Override
+    public Page<CustomerReviewEligibleBookingResponse> getEligibleBookings(
+            UUID customerId,
+            String keyword,
+            Pageable pageable
+    ) {
+        requireIdentifier(
+                customerId,
+                "Customer ID"
+        );
+
+        requirePageable(
+                pageable
+        );
+
+        Customer customer =
+                customerRepository
+                        .findActiveRecordById(
+                                customerId
+                        )
+                        .orElseThrow(
+                                () -> notFound(
+                                        "Customer was not found."
+                                )
+                        );
+
+        return customerReviewEligibleBookingRepository
+                .findEligibleBookingsByCustomer(
+                        customer.getCustomerId(),
+                        normalizeOptional(
+                                keyword
+                        ),
+                        pageable
+                )
+                .map(
+                        this::toEligibleBookingResponse
+                );
+    }
+
+    private CustomerReviewEligibleBookingResponse toEligibleBookingResponse(
+            BookingRequest bookingRequest
+    ) {
+        requireReviewEligibleCompletedBooking(
+                bookingRequest
+        );
+
+        Customer customer =
+                getRequiredBookingCustomer(
+                        bookingRequest
+                );
+
+        WebsiteService websiteService =
+                getRequiredBookingWebsiteService(
+                        bookingRequest
+                );
+
+        return new CustomerReviewEligibleBookingResponse(
+                bookingRequest.getBookingRequestId(),
+                bookingRequest.getReferenceNumber(),
+                bookingRequest.getCustomerId(),
+                customer.getCustomerNumber(),
+                customer.getDisplayName(),
+                customer.getPrimaryEmail(),
+                customer.getPrimaryPhone(),
+                websiteService.getServiceId(),
+                websiteService.getServiceCode(),
+                websiteService.getServiceSlug(),
+                bookingRequest.getServiceType(),
+                bookingRequest.getServiceMethod(),
+                bookingRequest.getCompletedAt(),
+                bookingRequest.getCompletionSummary()
+        );
+    }
+
+    // =================================================================
+    // SEARCH
+    // =================================================================
 
     @Override
     public Page<CustomerReview> searchReviews(
@@ -521,30 +780,42 @@ public class CustomerReviewServiceImplementation
             Boolean isSpam,
             Pageable pageable
     ) {
-        requirePageable(pageable);
+        requirePageable(
+                pageable
+        );
 
         if (
                 rating != null
-                        && (rating < 1 || rating > 5)
+                        && (
+                        rating < 1
+                                || rating > 5
+                )
         ) {
             throw badRequest(
                     "Rating must be between 1 and 5."
             );
         }
 
-        return customerReviewRepository.searchReviews(
-                normalizeOptional(keyword),
-                moderationStatus,
-                reviewSource,
-                rating,
-                serviceId,
-                isVerifiedCustomer,
-                isPublic,
-                isFeatured,
-                isSpam,
-                pageable
-        );
+        return customerReviewRepository
+                .searchReviews(
+                        normalizeOptional(
+                                keyword
+                        ),
+                        moderationStatus,
+                        reviewSource,
+                        rating,
+                        serviceId,
+                        isVerifiedCustomer,
+                        isPublic,
+                        isFeatured,
+                        isSpam,
+                        pageable
+                );
     }
+
+    // =================================================================
+    // APPROVE
+    // =================================================================
 
     @Override
     @Transactional
@@ -554,26 +825,40 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
             review.approve(
-                    normalizeOptional(moderationNotes),
+                    normalizeOptional(
+                            moderationNotes
+                    ),
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -586,6 +871,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // REJECT
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview rejectReview(
@@ -595,13 +884,19 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
             review.reject(
@@ -609,16 +904,24 @@ public class CustomerReviewServiceImplementation
                             rejectionReason,
                             "Rejection reason"
                     ),
-                    normalizeOptional(moderationNotes),
+                    normalizeOptional(
+                            moderationNotes
+                    ),
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -631,6 +934,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // SPAM
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview markReviewAsSpam(
@@ -639,30 +946,46 @@ public class CustomerReviewServiceImplementation
             String moderationNotes,
             UUID administratorId
     ) {
-        validateSpamScore(spamScore);
+        validateSpamScore(
+                spamScore
+        );
 
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
             review.markSpam(
                     spamScore,
-                    normalizeOptional(moderationNotes),
+                    normalizeOptional(
+                            moderationNotes
+                    ),
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -675,6 +998,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // PUBLISH
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview publishReview(
@@ -683,23 +1010,38 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
-            review.publish(featured, administrator);
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+            review.publish(
+                    featured,
+                    administrator
+            );
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -714,6 +1056,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // UNPUBLISH
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview unpublishReview(
@@ -721,19 +1067,29 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
-        review.unpublish(administrator);
+        review.unpublish(
+                administrator
+        );
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -746,6 +1102,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // FEATURED STATUS
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview updateFeaturedStatus(
@@ -754,26 +1114,38 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
             review.setFeatured(
                     featured,
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -790,6 +1162,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // HIDE
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview hideReview(
@@ -798,26 +1174,40 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         try {
             review.hide(
-                    normalizeOptional(moderationNotes),
+                    normalizeOptional(
+                            moderationNotes
+                    ),
                     administrator
             );
-        } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+        } catch (
+                IllegalStateException exception
+        ) {
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -830,6 +1220,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // ARCHIVE
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview archiveReview(
@@ -837,19 +1231,29 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
-        review.archive(administrator);
+        review.archive(
+                administrator
+        );
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -862,6 +1266,10 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // ADMIN RESPONSE
+    // =================================================================
+
     @Override
     @Transactional
     public CustomerReview addAdminResponse(
@@ -870,13 +1278,19 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
         review.addAdminResponse(
                 normalizeRequired(
@@ -888,7 +1302,9 @@ public class CustomerReviewServiceImplementation
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -908,19 +1324,29 @@ public class CustomerReviewServiceImplementation
             UUID administratorId
     ) {
         AdminUser administrator =
-                getRequiredAdministrator(administratorId);
+                getRequiredAdministrator(
+                        administratorId
+                );
 
         CustomerReview review =
-                getReviewForUpdate(customerReviewId);
+                getReviewForUpdate(
+                        customerReviewId
+                );
 
         JsonNode beforeSnapshot =
-                createReviewSnapshot(review);
+                createReviewSnapshot(
+                        review
+                );
 
-        review.removeAdminResponse(administrator);
+        review.removeAdminResponse(
+                administrator
+        );
 
         CustomerReview savedReview =
                 customerReviewRepository
-                        .saveAndFlush(review);
+                        .saveAndFlush(
+                                review
+                        );
 
         recordReviewAudit(
                 administratorId,
@@ -933,18 +1359,27 @@ public class CustomerReviewServiceImplementation
         return savedReview;
     }
 
+    // =================================================================
+    // PUBLIC REVIEWS
+    // =================================================================
+
     @Override
     public Page<CustomerReview> getPublicReviews(
             Pageable pageable
     ) {
-        requirePageable(pageable);
+        requirePageable(
+                pageable
+        );
 
         return customerReviewRepository
-                .findPublicReviews(pageable);
+                .findPublicReviews(
+                        pageable
+                );
     }
 
     @Override
-    public List<CustomerReview> getFeaturedPublicReviews() {
+    public List<CustomerReview>
+    getFeaturedPublicReviews() {
         return customerReviewRepository
                 .findFeaturedPublicReviews();
     }
@@ -955,10 +1390,14 @@ public class CustomerReviewServiceImplementation
             String serviceSlug,
             Pageable pageable
     ) {
-        requirePageable(pageable);
+        requirePageable(
+                pageable
+        );
 
         String normalizedSlug =
-                normalizeSlug(serviceSlug);
+                normalizeSlug(
+                        serviceSlug
+                );
 
         return customerReviewRepository
                 .findPublicReviewsByServiceSlug(
@@ -967,9 +1406,14 @@ public class CustomerReviewServiceImplementation
                 );
     }
 
+    // =================================================================
+    // PUBLIC RATING SUMMARY
+    // =================================================================
+
     @Override
     public CustomerReviewRatingSummaryResponse
     getPublicRatingSummary() {
+
         long totalReviews =
                 customerReviewRepository
                         .countPublicReviews();
@@ -982,7 +1426,9 @@ public class CustomerReviewServiceImplementation
                 average == null
                         ? 0.0
                         : BigDecimal
-                        .valueOf(average)
+                        .valueOf(
+                                average
+                        )
                         .setScale(
                                 2,
                                 RoundingMode.HALF_UP
@@ -991,29 +1437,39 @@ public class CustomerReviewServiceImplementation
 
         return new CustomerReviewRatingSummaryResponse(
                 totalReviews,
+
                 roundedAverage,
+
                 customerReviewRepository
                         .countPublicReviewsByRating(
                                 (short) 5
                         ),
+
                 customerReviewRepository
                         .countPublicReviewsByRating(
                                 (short) 4
                         ),
+
                 customerReviewRepository
                         .countPublicReviewsByRating(
                                 (short) 3
                         ),
+
                 customerReviewRepository
                         .countPublicReviewsByRating(
                                 (short) 2
                         ),
+
                 customerReviewRepository
                         .countPublicReviewsByRating(
                                 (short) 1
                         )
         );
     }
+
+    // =================================================================
+    // REVIEW AUDIT
+    // =================================================================
 
     private void recordReviewAudit(
             UUID administratorId,
@@ -1027,14 +1483,29 @@ public class CustomerReviewServiceImplementation
                 action,
                 WebsiteContentAuditResourceType.CUSTOMER_REVIEW,
                 review.getCustomerReviewId(),
-                createReviewResourceName(review),
+                createReviewResourceName(
+                        review
+                ),
                 beforeSnapshot,
-                createReviewSnapshot(review),
+                createReviewSnapshot(
+                        review
+                ),
                 summary,
                 null
         );
     }
 
+    /**
+     * Builds a deliberately non-sensitive audit snapshot.
+     *
+     * Excluded:
+     * - reviewer email;
+     * - reviewer phone;
+     * - review text;
+     * - submission IP;
+     * - consent IP;
+     * - user agent.
+     */
     private JsonNode createReviewSnapshot(
             CustomerReview review
     ) {
@@ -1048,33 +1519,31 @@ public class CustomerReviewServiceImplementation
 
         fields.put(
                 "reviewInvitationId",
-                review.getReviewInvitation() == null
+                review.getReviewInvitation()
+                        == null
                         ? null
-                        : review.getReviewInvitation()
+                        : review
+                        .getReviewInvitation()
                         .getReviewInvitationId()
         );
 
         fields.put(
                 "bookingRequestId",
-                review.getBookingRequest() == null
+                review.getBookingRequest()
+                        == null
                         ? null
-                        : review.getBookingRequest()
+                        : review
+                        .getBookingRequest()
                         .getBookingRequestId()
         );
 
         fields.put(
-                "contactInquiryId",
-                review.getContactInquiry() == null
-                        ? null
-                        : review.getContactInquiry()
-                        .getContactInquiryId()
-        );
-
-        fields.put(
                 "serviceId",
-                review.getWebsiteService() == null
+                review.getWebsiteService()
+                        == null
                         ? null
-                        : review.getWebsiteService()
+                        : review
+                        .getWebsiteService()
                         .getServiceId()
         );
 
@@ -1171,7 +1640,9 @@ public class CustomerReviewServiceImplementation
         );
 
         return websiteContentAuditSnapshotService
-                .createSnapshot(fields);
+                .createSnapshot(
+                        fields
+                );
     }
 
     private String createReviewResourceName(
@@ -1192,11 +1663,16 @@ public class CustomerReviewServiceImplementation
                 );
 
         if (displayName != null) {
-            return "Review by " + displayName;
+            return "Review by "
+                    + displayName;
         }
 
         return "Customer Review";
     }
+
+    // =================================================================
+    // REVIEW LOOKUPS
+    // =================================================================
 
     private CustomerReview getReviewForUpdate(
             UUID customerReviewId
@@ -1207,62 +1683,217 @@ public class CustomerReviewServiceImplementation
         );
 
         return customerReviewRepository
-                .findByIdForUpdate(customerReviewId)
-                .orElseThrow(() -> notFound(
-                        "Customer review was not found."
-                ));
+                .findByIdForUpdate(
+                        customerReviewId
+                )
+                .orElseThrow(
+                        () -> notFound(
+                                "Customer review was not found."
+                        )
+                );
     }
 
-    private BookingRequest getOptionalBookingRequest(
+    private BookingRequest getRequiredBookingRequest(
             UUID bookingRequestId
     ) {
-        if (bookingRequestId == null) {
-            return null;
-        }
+        requireIdentifier(
+                bookingRequestId,
+                "Booking request ID"
+        );
 
         return bookingRequestRepository
-                .findById(bookingRequestId)
-                .orElseThrow(() -> notFound(
-                        "Booking request was not found."
-                ));
+                .findById(
+                        bookingRequestId
+                )
+                .orElseThrow(
+                        () -> notFound(
+                                "Booking request was not found."
+                        )
+                );
     }
 
-    private ContactInquiry getOptionalContactInquiry(
-            UUID contactInquiryId
+    // =================================================================
+    // COMPLETED BOOKING VALIDATION
+    // =================================================================
+
+    private void requireReviewEligibleCompletedBooking(
+            BookingRequest bookingRequest
     ) {
-        if (contactInquiryId == null) {
-            return null;
+        if (bookingRequest == null) {
+            throw badRequest(
+                    "Booking request is required."
+            );
         }
 
-        return contactInquiryRepository
-                .findById(contactInquiryId)
-                .orElseThrow(() -> notFound(
-                        "Contact inquiry was not found."
-                ));
+        if (
+                bookingRequest.getStatus()
+                        != BookingRequestStatus.COMPLETED
+        ) {
+            throw conflict(
+                    "Only completed services can receive customer reviews."
+            );
+        }
+
+        if (
+                bookingRequest.getCompletedAt()
+                        == null
+        ) {
+            throw conflict(
+                    "The booking does not contain a service completion record."
+            );
+        }
+
+        if (
+                !bookingRequest.isReviewEligible()
+        ) {
+            throw conflict(
+                    "This completed service is not eligible for customer review."
+            );
+        }
+
+        if (
+                bookingRequest.getCustomerId()
+                        == null
+        ) {
+            throw conflict(
+                    "The completed booking is not linked to a customer."
+            );
+        }
+
+        if (
+                bookingRequest.getServiceId()
+                        == null
+        ) {
+            throw conflict(
+                    "The completed booking is not linked to a service."
+            );
+        }
     }
 
-    private WebsiteService getOptionalWebsiteService(
-            UUID serviceId
+    // =================================================================
+    // CUSTOMER RESOLUTION
+    // =================================================================
+
+    private Customer getRequiredBookingCustomer(
+            BookingRequest bookingRequest
     ) {
+        UUID customerId =
+                bookingRequest.getCustomerId();
+
+        if (customerId == null) {
+            throw conflict(
+                    "The completed booking is not linked to a customer."
+            );
+        }
+
+        return customerRepository
+                .findActiveRecordById(
+                        customerId
+                )
+                .orElseThrow(
+                        () -> notFound(
+                                "The customer linked to this booking was not found."
+                        )
+                );
+    }
+
+    // =================================================================
+    // SERVICE RESOLUTION
+    // =================================================================
+
+    /**
+     * Resolves the service exclusively from the completed booking.
+     *
+     * There is intentionally no optional/browser-selected service
+     * resolver in this service anymore.
+     */
+    private WebsiteService getRequiredBookingWebsiteService(
+            BookingRequest bookingRequest
+    ) {
+        UUID serviceId =
+                bookingRequest.getServiceId();
+
         if (serviceId == null) {
-            return null;
+            throw conflict(
+                    "The completed booking is not linked to a service."
+            );
         }
 
         WebsiteService service =
                 websiteServiceRepository
-                        .findById(serviceId)
-                        .orElseThrow(() -> notFound(
-                                "Website service was not found."
-                        ));
+                        .findById(
+                                serviceId
+                        )
+                        .orElseThrow(
+                                () -> notFound(
+                                        "The service linked to this booking was not found."
+                                )
+                        );
 
-        if (service.isDeleted()) {
+        if (
+                service.isDeleted()
+        ) {
             throw conflict(
-                    "A deleted website service cannot be assigned to a review."
+                    "The service linked to this booking has been deleted."
             );
         }
 
         return service;
     }
+
+    /**
+     * Ensures an existing review still points to the exact WebsiteService
+     * identified by the authoritative completed booking.
+     *
+     * This is a defensive data-integrity check for existing records.
+     */
+    private void requireReviewServiceMatchesBooking(
+            CustomerReview review,
+            BookingRequest bookingRequest
+    ) {
+        if (review == null) {
+            throw badRequest(
+                    "Customer review is required."
+            );
+        }
+
+        if (bookingRequest == null) {
+            throw badRequest(
+                    "Booking request is required."
+            );
+        }
+
+        WebsiteService reviewService =
+                review.getWebsiteService();
+
+        if (reviewService == null) {
+            throw conflict(
+                    "Customer review is not associated with the service performed."
+            );
+        }
+
+        UUID bookingServiceId =
+                bookingRequest.getServiceId();
+
+        UUID reviewServiceId =
+                reviewService.getServiceId();
+
+        if (
+                bookingServiceId == null
+                        || reviewServiceId == null
+                        || !bookingServiceId.equals(
+                        reviewServiceId
+                )
+        ) {
+            throw conflict(
+                    "Customer review service does not match the completed booking service."
+            );
+        }
+    }
+
+    // =================================================================
+    // REVIEW PHOTO
+    // =================================================================
 
     private WebsiteMediaAsset getOptionalPublicMediaAsset(
             UUID mediaAssetId
@@ -1273,12 +1904,20 @@ public class CustomerReviewServiceImplementation
 
         WebsiteMediaAsset mediaAsset =
                 websiteMediaAssetRepository
-                        .findById(mediaAssetId)
-                        .orElseThrow(() -> notFound(
-                                "Website media asset was not found."
-                        ));
+                        .findById(
+                                mediaAssetId
+                        )
+                        .orElseThrow(
+                                () -> notFound(
+                                        "Website media asset was not found."
+                                )
+                        );
 
-        if (!Boolean.TRUE.equals(mediaAsset.getIsPublic())) {
+        if (
+                !Boolean.TRUE.equals(
+                        mediaAsset.getIsPublic()
+                )
+        ) {
             throw conflict(
                     "Customer review photos must be public media assets."
             );
@@ -1286,6 +1925,10 @@ public class CustomerReviewServiceImplementation
 
         return mediaAsset;
     }
+
+    // =================================================================
+    // REVIEW CONTENT VALIDATION
+    // =================================================================
 
     private void validateReviewContent(
             CustomerReview review
@@ -1300,7 +1943,10 @@ public class CustomerReviewServiceImplementation
             );
         }
 
-        if (review.getReviewerDisplayPreference() == null) {
+        if (
+                review.getReviewerDisplayPreference()
+                        == null
+        ) {
             throw badRequest(
                     "Reviewer display preference is required."
             );
@@ -1308,19 +1954,26 @@ public class CustomerReviewServiceImplementation
 
         if (
                 review.getReviewerDisplayPreference()
-                        != CustomerReviewDisplayPreference.ANONYMOUS
+                        == CustomerReviewDisplayPreference.CUSTOM
+
                         && normalizeOptional(
                         review.getReviewerDisplayName()
                 ) == null
         ) {
             throw badRequest(
-                    "Reviewer display name is required unless the review is anonymous."
+                    "A custom reviewer display name is required when CUSTOM is selected."
             );
         }
 
+        String reviewText =
+                normalizeRequired(
+                        review.getReviewText(),
+                        "Review text"
+                );
+
         if (
-                review.getReviewText() != null
-                        && review.getReviewText().length() > 10000
+                reviewText.length()
+                        > 10000
         ) {
             throw badRequest(
                     "Review text must not exceed 10,000 characters."
@@ -1328,32 +1981,92 @@ public class CustomerReviewServiceImplementation
         }
     }
 
-    private String resolveSubmittedDisplayName(
+    // =================================================================
+    // DISPLAY NAME RESOLUTION
+    // =================================================================
+
+    private String resolveDisplayNameFromCustomer(
             CustomerReview requestedReview,
-            BookingRequest bookingRequest
+            Customer customer
     ) {
+        CustomerReviewDisplayPreference preference =
+                requestedReview
+                        .getReviewerDisplayPreference();
+
         if (
-                requestedReview.getReviewerDisplayPreference()
+                preference
                         == CustomerReviewDisplayPreference.ANONYMOUS
         ) {
             return null;
         }
 
-        String requestedName =
-                normalizeOptional(
-                        requestedReview
-                                .getReviewerDisplayName()
-                );
-
-        if (requestedName != null) {
-            return requestedName;
+        if (
+                preference
+                        == CustomerReviewDisplayPreference.CUSTOM
+        ) {
+            return normalizeRequired(
+                    requestedReview
+                            .getReviewerDisplayName(),
+                    "Custom reviewer display name"
+            );
         }
 
         return normalizeRequired(
-                bookingRequest.getFullName(),
-                "Booking customer name"
+                customer.getDisplayName(),
+                "Customer display name"
         );
     }
+
+    private String resolveUpdatedDisplayName(
+            CustomerReview requestedUpdate,
+            CustomerReview existingReview
+    ) {
+        CustomerReviewDisplayPreference preference =
+                requestedUpdate
+                        .getReviewerDisplayPreference();
+
+        if (
+                preference
+                        == CustomerReviewDisplayPreference.ANONYMOUS
+        ) {
+            return null;
+        }
+
+        if (
+                preference
+                        == CustomerReviewDisplayPreference.CUSTOM
+        ) {
+            return normalizeRequired(
+                    requestedUpdate
+                            .getReviewerDisplayName(),
+                    "Custom reviewer display name"
+            );
+        }
+
+        BookingRequest bookingRequest =
+                existingReview
+                        .getBookingRequest();
+
+        if (bookingRequest == null) {
+            throw conflict(
+                    "Customer review is not associated with a completed booking."
+            );
+        }
+
+        Customer customer =
+                getRequiredBookingCustomer(
+                        bookingRequest
+                );
+
+        return normalizeRequired(
+                customer.getDisplayName(),
+                "Customer display name"
+        );
+    }
+
+    // =================================================================
+    // SPAM SCORE VALIDATION
+    // =================================================================
 
     private void validateSpamScore(
             BigDecimal spamScore
@@ -1363,9 +2076,14 @@ public class CustomerReviewServiceImplementation
         }
 
         if (
-                spamScore.compareTo(BigDecimal.ZERO) < 0
+                spamScore.compareTo(
+                        BigDecimal.ZERO
+                ) < 0
+
                         || spamScore.compareTo(
-                        BigDecimal.valueOf(100)
+                        BigDecimal.valueOf(
+                                100
+                        )
                 ) > 0
         ) {
             throw badRequest(
@@ -1374,14 +2092,23 @@ public class CustomerReviewServiceImplementation
         }
     }
 
+    // =================================================================
+    // SAVE
+    // =================================================================
+
     private CustomerReview saveReview(
             CustomerReview review,
             String conflictMessage
     ) {
         try {
             return customerReviewRepository
-                    .saveAndFlush(review);
-        } catch (DataIntegrityViolationException exception) {
+                    .saveAndFlush(
+                            review
+                    );
+
+        } catch (
+                DataIntegrityViolationException exception
+        ) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
                     conflictMessage,
@@ -1389,6 +2116,10 @@ public class CustomerReviewServiceImplementation
             );
         }
     }
+
+    // =================================================================
+    // ADMINISTRATOR
+    // =================================================================
 
     private AdminUser getRequiredAdministrator(
             UUID administratorId
@@ -1399,11 +2130,19 @@ public class CustomerReviewServiceImplementation
         );
 
         return adminUserRepository
-                .findById(administratorId)
-                .orElseThrow(() -> notFound(
-                        "Administrator account was not found."
-                ));
+                .findById(
+                        administratorId
+                )
+                .orElseThrow(
+                        () -> notFound(
+                                "Administrator account was not found."
+                        )
+                );
     }
+
+    // =================================================================
+    // SLUG
+    // =================================================================
 
     private String normalizeSlug(
             String value
@@ -1413,11 +2152,21 @@ public class CustomerReviewServiceImplementation
                         value,
                         "Service slug"
                 )
-                        .toLowerCase(Locale.ROOT)
-                        .replaceAll("[^a-z0-9]+", "-")
-                        .replaceAll("^-+|-+$", "");
+                        .toLowerCase(
+                                Locale.ROOT
+                        )
+                        .replaceAll(
+                                "[^a-z0-9]+",
+                                "-"
+                        )
+                        .replaceAll(
+                                "^-+|-+$",
+                                ""
+                        );
 
-        if (normalized.isBlank()) {
+        if (
+                normalized.isBlank()
+        ) {
             throw badRequest(
                     "Service slug is required."
             );
@@ -1426,12 +2175,18 @@ public class CustomerReviewServiceImplementation
         return normalized;
     }
 
+    // =================================================================
+    // STRING HELPERS
+    // =================================================================
+
     private String truncate(
             String value,
             int maximumLength
     ) {
         String normalized =
-                normalizeOptional(value);
+                normalizeOptional(
+                        value
+                );
 
         if (
                 normalized == null
@@ -1446,6 +2201,43 @@ public class CustomerReviewServiceImplementation
                 maximumLength
         );
     }
+
+    private String normalizeRequired(
+            String value,
+            String fieldName
+    ) {
+        String normalized =
+                normalizeOptional(
+                        value
+                );
+
+        if (normalized == null) {
+            throw badRequest(
+                    fieldName + " is required."
+            );
+        }
+
+        return normalized;
+    }
+
+    private String normalizeOptional(
+            String value
+    ) {
+        if (value == null) {
+            return null;
+        }
+
+        String normalized =
+                value.trim();
+
+        return normalized.isEmpty()
+                ? null
+                : normalized;
+    }
+
+    // =================================================================
+    // GENERAL VALIDATION
+    // =================================================================
 
     private void requireIdentifier(
             UUID identifier,
@@ -1468,35 +2260,9 @@ public class CustomerReviewServiceImplementation
         }
     }
 
-    private String normalizeRequired(
-            String value,
-            String fieldName
-    ) {
-        String normalized =
-                normalizeOptional(value);
-
-        if (normalized == null) {
-            throw badRequest(
-                    fieldName + " is required."
-            );
-        }
-
-        return normalized;
-    }
-
-    private String normalizeOptional(
-            String value
-    ) {
-        if (value == null) {
-            return null;
-        }
-
-        String normalized = value.trim();
-
-        return normalized.isEmpty()
-                ? null
-                : normalized;
-    }
+    // =================================================================
+    // HTTP EXCEPTIONS
+    // =================================================================
 
     private ResponseStatusException badRequest(
             String message

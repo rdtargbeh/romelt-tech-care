@@ -2,6 +2,7 @@ package romelt_techcare.backend.service.implement;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
@@ -11,6 +12,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 import romelt_techcare.backend.dto.CustomerReviewInvitationCreatedResponse;
+import romelt_techcare.backend.dto.EmailSendResult;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.BookingRequest;
 import romelt_techcare.backend.entity.CustomerReviewInvitation;
@@ -22,10 +24,13 @@ import romelt_techcare.backend.repository.BookingRequestRepository;
 import romelt_techcare.backend.repository.CustomerReviewInvitationRepository;
 import romelt_techcare.backend.service.CustomerReviewInvitationService;
 import romelt_techcare.backend.service.CustomerReviewInvitationTokenService;
+import romelt_techcare.backend.service.EmailService;
 import romelt_techcare.backend.service.WebsiteContentAuditLogService;
 import romelt_techcare.backend.service.WebsiteContentAuditSnapshotService;
 
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -38,17 +43,46 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Implements secure review-invitation creation, delivery state,
- * validation, consumption, revocation, expiration, and audit logging.
+ * Implements secure review-invitation creation, email delivery,
+ * delivery-state tracking, public-token validation, consumption,
+ * revocation, expiration, and immutable audit logging.
+ *
+ * Review invitation workflow:
+ *
+ * 1. Administrator selects a COMPLETED booking.
+ * 2. Backend verifies that the booking is eligible for review.
+ * 3. Backend generates a cryptographically secure review token.
+ * 4. Only the SHA-256 token hash is stored in the database.
+ * 5. A secure public review URL is created using the plain token.
+ * 6. The review invitation email is sent directly through EmailService.
+ * 7. If email delivery is accepted, the invitation becomes SENT.
+ * 8. If email delivery fails, the invitation remains PENDING.
+ * 9. Customer follows the secure link and submits one verified review.
+ * 10. Successful review submission consumes the invitation.
  *
  * Security:
  * - Generates a high-entropy token.
  * - Persists only its SHA-256 hash.
- * - Returns the plain token once.
- * - Never logs or includes token values in audit records.
- * - Uses pessimistic locking for state transitions.
+ * - Returns the plain token only from the creation response.
+ * - Never writes the plain token to audit records.
+ * - Never writes the plain token to application logs.
+ * - Never persists the secure review URL in the notifications table.
+ * - Uses pessimistic locking for invitation state transitions.
+ *
+ * Important:
+ *
+ * Review invitation email is sent directly through EmailService rather
+ * than NotificationService because the current NotificationService
+ * persists messageText/messageHtml before sending. A review email body
+ * contains the plain invitation token inside the review URL and that
+ * token must not be persisted.
+ *
+ * Normal booking/contact notifications may continue using the standard
+ * NotificationService because they do not contain one-time security
+ * tokens.
  * ================================================================
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 @Transactional(readOnly = true)
@@ -65,6 +99,15 @@ public class CustomerReviewInvitationServiceImplementation
                     CustomerReviewInvitationStatus.SENT
             );
 
+    private static final DateTimeFormatter
+            REVIEW_EXPIRATION_FORMATTER =
+            DateTimeFormatter
+                    .ofPattern(
+                            "MMMM d, yyyy 'at' h:mm a 'UTC'",
+                            Locale.US
+                    )
+                    .withZone(ZoneOffset.UTC);
+
     private final CustomerReviewInvitationRepository
             invitationRepository;
 
@@ -77,6 +120,9 @@ public class CustomerReviewInvitationServiceImplementation
     private final CustomerReviewInvitationTokenService
             tokenService;
 
+    private final EmailService
+            emailService;
+
     private final WebsiteContentAuditLogService
             websiteContentAuditLogService;
 
@@ -86,6 +132,32 @@ public class CustomerReviewInvitationServiceImplementation
     @Value("${app.public-site-url:http://localhost:5173}")
     private String publicSiteUrl;
 
+
+    // =================================================================
+    // CREATE + SEND REVIEW INVITATION
+    // =================================================================
+
+    /**
+     * Creates a secure review invitation and immediately attempts to
+     * deliver it to the booking customer's email address.
+     *
+     * Business rules:
+     * - Booking must exist.
+     * - Booking must be COMPLETED.
+     * - Booking must have an email address.
+     * - Booking cannot already have an active invitation.
+     * - Expiration must be in the future.
+     *
+     * Delivery behavior:
+     * - Invitation is first persisted as PENDING.
+     * - Email is then sent using the one-time plain token.
+     * - Successful provider acceptance changes status to SENT.
+     * - Failed email delivery leaves invitation PENDING.
+     *
+     * Security:
+     * The plain token is used only in memory while constructing the
+     * outbound email. It is never persisted by this service.
+     */
     @Override
     @Transactional
     public CustomerReviewInvitationCreatedResponse createInvitation(
@@ -135,14 +207,15 @@ public class CustomerReviewInvitationServiceImplementation
         GeneratedToken generatedToken =
                 generateUniqueToken();
 
+        String customerEmail =
+                normalizeEmail(
+                        bookingRequest.getEmail()
+                );
+
         CustomerReviewInvitation invitation =
                 CustomerReviewInvitation.builder()
                         .bookingRequest(bookingRequest)
-                        .customerEmail(
-                                normalizeEmail(
-                                        bookingRequest.getEmail()
-                                )
-                        )
+                        .customerEmail(customerEmail)
                         .tokenHash(
                                 generatedToken.tokenHash()
                         )
@@ -160,6 +233,7 @@ public class CustomerReviewInvitationServiceImplementation
                     invitationRepository.saveAndFlush(
                             invitation
                     );
+
         } catch (DataIntegrityViolationException exception) {
             throw new ResponseStatusException(
                     HttpStatus.CONFLICT,
@@ -180,10 +254,57 @@ public class CustomerReviewInvitationServiceImplementation
                 null
         );
 
+        /*
+         * IMPORTANT:
+         *
+         * The plain token exists only in memory.
+         *
+         * Do not place reviewUrl or plainToken in:
+         * - audit snapshots;
+         * - database notification records;
+         * - log statements;
+         * - exception messages.
+         */
         String reviewUrl =
                 normalizePublicSiteUrl(publicSiteUrl)
                         + "/review?token="
                         + generatedToken.plainToken();
+
+        ReviewInvitationDeliveryResult deliveryResult =
+                sendReviewInvitationEmail(
+                        savedInvitation,
+                        bookingRequest,
+                        reviewUrl
+                );
+
+        if (deliveryResult.successful()) {
+            JsonNode beforeSentSnapshot =
+                    createInvitationSnapshot(
+                            savedInvitation
+                    );
+
+            try {
+                savedInvitation.markSent();
+
+            } catch (IllegalStateException exception) {
+                throw conflict(
+                        exception.getMessage()
+                );
+            }
+
+            savedInvitation =
+                    invitationRepository.saveAndFlush(
+                            savedInvitation
+                    );
+
+            recordInvitationAudit(
+                    administratorId,
+                    WebsiteContentAuditAction.MARK_SENT,
+                    savedInvitation,
+                    beforeSentSnapshot,
+                    "Customer review invitation email sent."
+            );
+        }
 
         return new CustomerReviewInvitationCreatedResponse(
                 savedInvitation.getReviewInvitationId(),
@@ -193,10 +314,17 @@ public class CustomerReviewInvitationServiceImplementation
                 generatedToken.plainToken(),
                 reviewUrl,
                 savedInvitation.getExpiresAt(),
-                "Review invitation created. The plain token is "
-                        + "shown only in this response."
+                deliveryResult.successful()
+                        ? "Review invitation created and emailed successfully."
+                        : "Review invitation was created, but the email could not "
+                        + "be sent. The invitation remains pending."
         );
     }
+
+
+    // =================================================================
+    // GET INVITATION
+    // =================================================================
 
     @Override
     @Transactional
@@ -250,6 +378,11 @@ public class CustomerReviewInvitationServiceImplementation
         return invitation;
     }
 
+
+    // =================================================================
+    // SEARCH INVITATIONS
+    // =================================================================
+
     @Override
     public Page<CustomerReviewInvitation> searchInvitations(
             String keyword,
@@ -264,6 +397,11 @@ public class CustomerReviewInvitationServiceImplementation
                 pageable
         );
     }
+
+
+    // =================================================================
+    // GET BOOKING INVITATIONS
+    // =================================================================
 
     @Override
     public Page<CustomerReviewInvitation> getBookingInvitations(
@@ -293,6 +431,19 @@ public class CustomerReviewInvitationServiceImplementation
                 );
     }
 
+
+    // =================================================================
+    // MANUALLY MARK SENT
+    // =================================================================
+
+    /**
+     * Preserves the existing administrative operation for cases where an
+     * invitation was delivered manually outside the automated email
+     * workflow.
+     *
+     * Normal invitations created through createInvitation() are marked
+     * SENT automatically after successful email provider acceptance.
+     */
     @Override
     @Transactional
     public CustomerReviewInvitation markInvitationSent(
@@ -333,7 +484,14 @@ public class CustomerReviewInvitationServiceImplementation
             );
         }
 
-        invitation.markSent();
+        try {
+            invitation.markSent();
+
+        } catch (IllegalStateException exception) {
+            throw conflict(
+                    exception.getMessage()
+            );
+        }
 
         CustomerReviewInvitation savedInvitation =
                 invitationRepository
@@ -349,6 +507,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         return savedInvitation;
     }
+
+
+    // =================================================================
+    // REVOKE INVITATION
+    // =================================================================
 
     @Override
     @Transactional
@@ -369,8 +532,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         try {
             invitation.revoke(administrator);
+
         } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReviewInvitation savedInvitation =
@@ -387,6 +553,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         return savedInvitation;
     }
+
+
+    // =================================================================
+    // VALIDATE PUBLIC TOKEN
+    // =================================================================
 
     @Override
     @Transactional
@@ -407,6 +578,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         return invitation;
     }
+
+
+    // =================================================================
+    // CONSUME INVITATION
+    // =================================================================
 
     @Override
     @Transactional
@@ -430,8 +606,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         try {
             invitation.markUsed();
+
         } catch (IllegalStateException exception) {
-            throw conflict(exception.getMessage());
+            throw conflict(
+                    exception.getMessage()
+            );
         }
 
         CustomerReviewInvitation savedInvitation =
@@ -448,6 +627,11 @@ public class CustomerReviewInvitationServiceImplementation
 
         return savedInvitation;
     }
+
+
+    // =================================================================
+    // EXPIRE INVITATIONS
+    // =================================================================
 
     @Override
     @Transactional
@@ -501,6 +685,499 @@ public class CustomerReviewInvitationServiceImplementation
         return updatedCount;
     }
 
+
+    // =================================================================
+    // REVIEW INVITATION EMAIL
+    // =================================================================
+
+    /**
+     * Sends the secure review invitation without persisting the email
+     * body or secure URL.
+     *
+     * The EmailService sends directly through the configured SMTP
+     * provider and returns a safe delivery result.
+     */
+    private ReviewInvitationDeliveryResult sendReviewInvitationEmail(
+            CustomerReviewInvitation invitation,
+            BookingRequest bookingRequest,
+            String reviewUrl
+    ) {
+        String customerName =
+                resolveCustomerName(
+                        bookingRequest
+                );
+
+        String referenceNumber =
+                resolveReferenceNumber(
+                        bookingRequest
+                );
+
+        String subject =
+                "How was your Romelt TechCare service? — "
+                        + referenceNumber;
+
+        String textBody =
+                buildReviewInvitationText(
+                        customerName,
+                        referenceNumber,
+                        bookingRequest,
+                        invitation.getExpiresAt(),
+                        reviewUrl
+                );
+
+        String htmlBody =
+                buildReviewInvitationHtml(
+                        customerName,
+                        referenceNumber,
+                        bookingRequest,
+                        invitation.getExpiresAt(),
+                        reviewUrl
+                );
+
+        try {
+            EmailSendResult result =
+                    emailService.sendEmail(
+                            invitation.getCustomerEmail(),
+                            customerName,
+                            subject,
+                            textBody,
+                            htmlBody
+                    );
+
+            if (
+                    result != null
+                            && result.successful()
+            ) {
+                log.info(
+                        "Review invitation email accepted by provider. reviewInvitationId={}, bookingRequestId={}, referenceNumber={}, provider={}",
+                        invitation.getReviewInvitationId(),
+                        bookingRequest.getBookingRequestId(),
+                        referenceNumber,
+                        normalizeOptional(
+                                result.providerName()
+                        )
+                );
+
+                return new ReviewInvitationDeliveryResult(
+                        true,
+                        null,
+                        null
+                );
+            }
+
+            String failureCode =
+                    result == null
+                            ? "EMAIL_EMPTY_RESULT"
+                            : normalizeOptional(
+                            result.failureCode()
+                    );
+
+            String failureMessage =
+                    result == null
+                            ? "Email provider returned no delivery result."
+                            : normalizeOptional(
+                            result.failureMessage()
+                    );
+
+            log.warn(
+                    "Review invitation email was not sent. reviewInvitationId={}, bookingRequestId={}, referenceNumber={}, failureCode={}",
+                    invitation.getReviewInvitationId(),
+                    bookingRequest.getBookingRequestId(),
+                    referenceNumber,
+                    failureCode == null
+                            ? "UNKNOWN"
+                            : failureCode
+            );
+
+            return new ReviewInvitationDeliveryResult(
+                    false,
+                    failureCode,
+                    failureMessage
+            );
+
+        } catch (Exception exception) {
+            /*
+             * Never log:
+             * - reviewUrl;
+             * - plain token;
+             * - complete email body.
+             */
+            log.error(
+                    "Review invitation email failed unexpectedly. reviewInvitationId={}, bookingRequestId={}, referenceNumber={}, errorType={}",
+                    invitation.getReviewInvitationId(),
+                    bookingRequest.getBookingRequestId(),
+                    referenceNumber,
+                    exception
+                            .getClass()
+                            .getSimpleName()
+            );
+
+            return new ReviewInvitationDeliveryResult(
+                    false,
+                    "REVIEW_INVITATION_EMAIL_ERROR",
+                    safeFailureMessage(
+                            exception.getMessage(),
+                            "An unexpected review invitation email error occurred."
+                    )
+            );
+        }
+    }
+
+
+    // =================================================================
+    // EMAIL TEXT BODY
+    // =================================================================
+
+    private String buildReviewInvitationText(
+            String customerName,
+            String referenceNumber,
+            BookingRequest bookingRequest,
+            Instant expiresAt,
+            String reviewUrl
+    ) {
+        String serviceName =
+                resolveServiceName(
+                        bookingRequest
+                );
+
+        return """
+                Hi %s,
+
+                Thank you for choosing Romelt TechCare.
+
+                Your service request %s has been completed. We would appreciate your feedback about your experience with our service.
+
+                Service:
+                %s
+
+                Share your experience:
+                %s
+
+                This is a secure, single-use review link. It expires on %s.
+
+                Your review will be submitted to Romelt TechCare for moderation before it may appear publicly on our website.
+
+                You may choose how your name is displayed when submitting your review.
+
+                If you did not receive service from Romelt TechCare or you believe this message was sent to you by mistake, you may ignore this email.
+
+                Thank you for trusting Romelt TechCare.
+
+                Romelt TechCare
+                Hassle-free technology support.
+                """
+                .formatted(
+                        customerName,
+                        referenceNumber,
+                        serviceName,
+                        reviewUrl,
+                        formatExpiration(expiresAt)
+                );
+    }
+
+
+    // =================================================================
+    // EMAIL HTML BODY
+    // =================================================================
+
+    private String buildReviewInvitationHtml(
+            String customerName,
+            String referenceNumber,
+            BookingRequest bookingRequest,
+            Instant expiresAt,
+            String reviewUrl
+    ) {
+        String safeCustomerName =
+                escapeHtml(customerName);
+
+        String safeReferenceNumber =
+                escapeHtml(referenceNumber);
+
+        String safeServiceName =
+                escapeHtml(
+                        resolveServiceName(
+                                bookingRequest
+                        )
+                );
+
+        String safeExpiration =
+                escapeHtml(
+                        formatExpiration(expiresAt)
+                );
+
+        String safeReviewUrl =
+                escapeHtml(reviewUrl);
+
+        return """
+                <!doctype html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Romelt TechCare Review Invitation</title>
+                </head>
+
+                <body style="
+                    margin:0;
+                    padding:0;
+                    background:#f8fafc;
+                    font-family:Arial,Helvetica,sans-serif;
+                    color:#0f172a;
+                ">
+
+                    <table
+                        role="presentation"
+                        width="100%%"
+                        cellspacing="0"
+                        cellpadding="0"
+                        border="0"
+                        style="background:#f8fafc;padding:32px 16px;"
+                    >
+                        <tr>
+                            <td align="center">
+
+                                <table
+                                    role="presentation"
+                                    width="100%%"
+                                    cellspacing="0"
+                                    cellpadding="0"
+                                    border="0"
+                                    style="
+                                        max-width:640px;
+                                        background:#ffffff;
+                                        border:1px solid #e2e8f0;
+                                        border-radius:16px;
+                                        overflow:hidden;
+                                    "
+                                >
+
+                                    <tr>
+                                        <td style="
+                                            background:#0f172a;
+                                            padding:28px 32px;
+                                            color:#ffffff;
+                                        ">
+                                            <div style="
+                                                font-size:12px;
+                                                font-weight:700;
+                                                text-transform:uppercase;
+                                                letter-spacing:1.5px;
+                                                color:#93c5fd;
+                                            ">
+                                                Romelt TechCare
+                                            </div>
+
+                                            <div style="
+                                                margin-top:8px;
+                                                font-size:25px;
+                                                line-height:1.25;
+                                                font-weight:800;
+                                            ">
+                                                How was your service?
+                                            </div>
+                                        </td>
+                                    </tr>
+
+                                    <tr>
+                                        <td style="padding:32px;">
+
+                                            <p style="
+                                                margin:0 0 18px;
+                                                font-size:16px;
+                                                line-height:1.7;
+                                            ">
+                                                Hi <strong>%s</strong>,
+                                            </p>
+
+                                            <p style="
+                                                margin:0 0 18px;
+                                                font-size:15px;
+                                                line-height:1.7;
+                                                color:#334155;
+                                            ">
+                                                Thank you for choosing Romelt TechCare.
+                                                Your service request has been completed,
+                                                and we would appreciate your feedback
+                                                about your experience.
+                                            </p>
+
+                                            <table
+                                                role="presentation"
+                                                width="100%%"
+                                                cellspacing="0"
+                                                cellpadding="0"
+                                                border="0"
+                                                style="
+                                                    margin:24px 0;
+                                                    background:#f8fafc;
+                                                    border:1px solid #e2e8f0;
+                                                    border-radius:12px;
+                                                "
+                                            >
+                                                <tr>
+                                                    <td style="padding:18px 20px;">
+
+                                                        <div style="
+                                                            font-size:11px;
+                                                            font-weight:700;
+                                                            text-transform:uppercase;
+                                                            letter-spacing:1px;
+                                                            color:#64748b;
+                                                        ">
+                                                            Service request
+                                                        </div>
+
+                                                        <div style="
+                                                            margin-top:5px;
+                                                            font-size:16px;
+                                                            font-weight:700;
+                                                            color:#0f172a;
+                                                        ">
+                                                            %s
+                                                        </div>
+
+                                                        <div style="
+                                                            margin-top:12px;
+                                                            font-size:11px;
+                                                            font-weight:700;
+                                                            text-transform:uppercase;
+                                                            letter-spacing:1px;
+                                                            color:#64748b;
+                                                        ">
+                                                            Service
+                                                        </div>
+
+                                                        <div style="
+                                                            margin-top:5px;
+                                                            font-size:15px;
+                                                            color:#334155;
+                                                        ">
+                                                            %s
+                                                        </div>
+
+                                                    </td>
+                                                </tr>
+                                            </table>
+
+                                            <p style="
+                                                margin:0 0 22px;
+                                                font-size:15px;
+                                                line-height:1.7;
+                                                color:#334155;
+                                            ">
+                                                Your feedback helps us improve our service
+                                                and helps future customers understand what
+                                                they can expect from Romelt TechCare.
+                                            </p>
+
+                                            <table
+                                                role="presentation"
+                                                cellspacing="0"
+                                                cellpadding="0"
+                                                border="0"
+                                                style="margin:0 auto 26px;"
+                                            >
+                                                <tr>
+                                                    <td
+                                                        align="center"
+                                                        bgcolor="#1976D2"
+                                                        style="border-radius:10px;"
+                                                    >
+                                                        <a
+                                                            href="%s"
+                                                            style="
+                                                                display:inline-block;
+                                                                padding:14px 28px;
+                                                                font-size:15px;
+                                                                font-weight:700;
+                                                                color:#ffffff;
+                                                                text-decoration:none;
+                                                            "
+                                                        >
+                                                            Leave a Review
+                                                        </a>
+                                                    </td>
+                                                </tr>
+                                            </table>
+
+                                            <div style="
+                                                margin-top:8px;
+                                                padding:16px;
+                                                background:#eff6ff;
+                                                border:1px solid #bfdbfe;
+                                                border-radius:10px;
+                                                font-size:13px;
+                                                line-height:1.6;
+                                                color:#1e3a8a;
+                                            ">
+                                                <strong>Secure review link</strong><br>
+                                                This link can be used once and expires on
+                                                %s.
+                                            </div>
+
+                                            <p style="
+                                                margin:24px 0 0;
+                                                font-size:13px;
+                                                line-height:1.7;
+                                                color:#64748b;
+                                            ">
+                                                Your review will be submitted to Romelt
+                                                TechCare for moderation before it may
+                                                appear publicly on our website.
+                                            </p>
+
+                                            <p style="
+                                                margin:14px 0 0;
+                                                font-size:13px;
+                                                line-height:1.7;
+                                                color:#64748b;
+                                            ">
+                                                If you did not receive service from Romelt
+                                                TechCare or believe this email was sent to
+                                                you by mistake, you may safely ignore it.
+                                            </p>
+
+                                        </td>
+                                    </tr>
+
+                                    <tr>
+                                        <td style="
+                                            border-top:1px solid #e2e8f0;
+                                            padding:22px 32px;
+                                            font-size:12px;
+                                            line-height:1.6;
+                                            color:#64748b;
+                                        ">
+                                            Thank you for trusting
+                                            <strong style="color:#0f172a;">
+                                                Romelt TechCare
+                                            </strong>.
+                                        </td>
+                                    </tr>
+
+                                </table>
+
+                            </td>
+                        </tr>
+                    </table>
+
+                </body>
+                </html>
+                """
+                .formatted(
+                        safeCustomerName,
+                        safeReferenceNumber,
+                        safeServiceName,
+                        safeReviewUrl,
+                        safeExpiration
+                );
+    }
+
+
+    // =================================================================
+    // AUDIT
+    // =================================================================
+
     private void recordInvitationAudit(
             UUID administratorId,
             WebsiteContentAuditAction action,
@@ -520,6 +1197,7 @@ public class CustomerReviewInvitationServiceImplementation
                 null
         );
     }
+
 
     private JsonNode createInvitationSnapshot(
             CustomerReviewInvitation invitation
@@ -582,6 +1260,7 @@ public class CustomerReviewInvitationServiceImplementation
                 .createSnapshot(fields);
     }
 
+
     private String createInvitationResourceName(
             CustomerReviewInvitation invitation
     ) {
@@ -590,12 +1269,18 @@ public class CustomerReviewInvitationServiceImplementation
                         && invitation.getBookingRequest()
                         .getReferenceNumber() != null
         ) {
-            return invitation.getBookingRequest()
+            return invitation
+                    .getBookingRequest()
                     .getReferenceNumber();
         }
 
         return "Customer Review Invitation";
     }
+
+
+    // =================================================================
+    // INVITATION LOOKUP
+    // =================================================================
 
     private CustomerReviewInvitation getInvitationForUpdate(
             UUID reviewInvitationId
@@ -611,6 +1296,11 @@ public class CustomerReviewInvitationServiceImplementation
                         "Review invitation was not found."
                 ));
     }
+
+
+    // =================================================================
+    // PUBLIC INVITATION VALIDATION
+    // =================================================================
 
     private void requireUsableInvitation(
             CustomerReviewInvitation invitation
@@ -663,6 +1353,11 @@ public class CustomerReviewInvitationServiceImplementation
         }
     }
 
+
+    // =================================================================
+    // BOOKING ELIGIBILITY
+    // =================================================================
+
     private void requireReviewEligibleBooking(
             BookingRequest bookingRequest
     ) {
@@ -685,6 +1380,11 @@ public class CustomerReviewInvitationServiceImplementation
                 bookingRequest.getEmail()
         );
     }
+
+
+    // =================================================================
+    // TOKEN GENERATION
+    // =================================================================
 
     private GeneratedToken generateUniqueToken() {
         for (
@@ -714,6 +1414,11 @@ public class CustomerReviewInvitationServiceImplementation
         );
     }
 
+
+    // =================================================================
+    // ADMINISTRATOR
+    // =================================================================
+
     private AdminUser getRequiredAdministrator(
             UUID administratorId
     ) {
@@ -728,6 +1433,67 @@ public class CustomerReviewInvitationServiceImplementation
                         "Administrator account was not found."
                 ));
     }
+
+
+    // =================================================================
+    // BOOKING DISPLAY HELPERS
+    // =================================================================
+
+    private String resolveCustomerName(
+            BookingRequest bookingRequest
+    ) {
+        String customerName =
+                normalizeOptional(
+                        bookingRequest.getFullName()
+                );
+
+        return customerName == null
+                ? "Customer"
+                : customerName;
+    }
+
+
+    private String resolveReferenceNumber(
+            BookingRequest bookingRequest
+    ) {
+        String referenceNumber =
+                normalizeOptional(
+                        bookingRequest.getReferenceNumber()
+                );
+
+        return referenceNumber == null
+                ? "your completed service request"
+                : referenceNumber;
+    }
+
+
+    private String resolveServiceName(
+            BookingRequest bookingRequest
+    ) {
+        String serviceType =
+                normalizeOptional(
+                        bookingRequest.getServiceType()
+                );
+
+        if (serviceType == null) {
+            return "Technology support service";
+        }
+
+        return serviceType
+                .replace('_', ' ')
+                .toLowerCase(Locale.ROOT)
+                .replaceFirst(
+                        "^.",
+                        serviceType
+                                .substring(0, 1)
+                                .toUpperCase(Locale.ROOT)
+                );
+    }
+
+
+    // =================================================================
+    // EMAIL / URL HELPERS
+    // =================================================================
 
     private String normalizeEmail(
             String value
@@ -747,6 +1513,7 @@ public class CustomerReviewInvitationServiceImplementation
         );
     }
 
+
     private String normalizePublicSiteUrl(
             String value
     ) {
@@ -765,6 +1532,39 @@ public class CustomerReviewInvitationServiceImplementation
                 : normalized;
     }
 
+
+    private String formatExpiration(
+            Instant expiresAt
+    ) {
+        if (expiresAt == null) {
+            return "the invitation expiration time";
+        }
+
+        return REVIEW_EXPIRATION_FORMATTER
+                .format(expiresAt);
+    }
+
+
+    private String escapeHtml(
+            String value
+    ) {
+        if (value == null) {
+            return "";
+        }
+
+        return value
+                .replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\"", "&quot;")
+                .replace("'", "&#39;");
+    }
+
+
+    // =================================================================
+    // VALIDATION
+    // =================================================================
+
     private void requireIdentifier(
             UUID identifier,
             String fieldName
@@ -776,6 +1576,7 @@ public class CustomerReviewInvitationServiceImplementation
         }
     }
 
+
     private void requirePageable(
             Pageable pageable
     ) {
@@ -786,6 +1587,11 @@ public class CustomerReviewInvitationServiceImplementation
         }
     }
 
+
+    // =================================================================
+    // NORMALIZATION
+    // =================================================================
+
     private String normalizeOptional(
             String value
     ) {
@@ -793,12 +1599,38 @@ public class CustomerReviewInvitationServiceImplementation
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null
                 : normalized;
     }
+
+
+    private String safeFailureMessage(
+            String value,
+            String fallback
+    ) {
+        String normalized =
+                normalizeOptional(value);
+
+        if (normalized == null) {
+            return fallback;
+        }
+
+        return normalized.length() <= 1000
+                ? normalized
+                : normalized.substring(
+                0,
+                1000
+        );
+    }
+
+
+    // =================================================================
+    // HTTP EXCEPTIONS
+    // =================================================================
 
     private ResponseStatusException badRequest(
             String message
@@ -809,6 +1641,7 @@ public class CustomerReviewInvitationServiceImplementation
         );
     }
 
+
     private ResponseStatusException notFound(
             String message
     ) {
@@ -817,6 +1650,7 @@ public class CustomerReviewInvitationServiceImplementation
                 message
         );
     }
+
 
     private ResponseStatusException conflict(
             String message
@@ -827,9 +1661,22 @@ public class CustomerReviewInvitationServiceImplementation
         );
     }
 
+
+    // =================================================================
+    // INTERNAL RECORDS
+    // =================================================================
+
     private record GeneratedToken(
             String plainToken,
             String tokenHash
+    ) {
+    }
+
+
+    private record ReviewInvitationDeliveryResult(
+            boolean successful,
+            String failureCode,
+            String failureMessage
     ) {
     }
 }

@@ -41,18 +41,67 @@ import java.util.UUID;
  * publication state, consent evidence, and optional administrator
  * responses.
  *
+ * Core business rule:
+ * Every Romelt TechCare customer review represents feedback about an
+ * actual service received through a completed, review-eligible
+ * BookingRequest.
+ *
+ * The completed booking is the authoritative relationship that proves:
+ * - the customer received a Romelt TechCare service;
+ * - which customer received the service;
+ * - which service was performed;
+ * - whether the service is eligible for review.
+ *
+ * Review ownership:
+ *
+ * Customer
+ *      -> BookingRequest
+ *          -> WebsiteService
+ *              -> CustomerReview
+ *
+ * ContactInquiry is intentionally not part of customer-review
+ * ownership. A contact inquiry does not prove that a service was
+ * actually received.
+ *
+ * Review source describes HOW or WHERE the customer communicated the
+ * feedback.
+ *
+ * Examples:
+ * - BOOKING_FOLLOW_UP
+ * - PHONE
+ * - EMAIL
+ * - GOOGLE
+ * - FACEBOOK
+ * - OTHER
+ *
+ * Review source itself does not establish customer verification.
+ *
  * Responsibilities:
  * - Supports verified reviews submitted through secure invitation
  *   tokens.
- * - Supports administrator-entered reviews from phone, email, Google,
- *   Facebook, and other external sources.
- * - Associates reviews with bookings, inquiries, services, and media.
+ * - Supports administrator recording of service-based feedback
+ *   communicated by phone, email, Google, Facebook, or another
+ *   supported source.
+ * - Requires every persisted review to remain associated with its
+ *   completed booking and performed service.
  * - Preserves consent information required for public publication.
  * - Supports moderation, approval, rejection, spam classification,
  *   hiding, archival, and featured placement.
  * - Protects private customer email and phone information from public
  *   responses.
  * - Supports optimistic locking.
+ *
+ * Immutable service identity:
+ * Once a review has been created, normal review-content editing must
+ * not replace:
+ * - bookingRequest;
+ * - reviewerEmail;
+ * - reviewerPhone;
+ * - websiteService;
+ * - isVerifiedCustomer;
+ * - reviewInvitation.
+ *
+ * Those fields represent authoritative customer/service history.
  *
  * Publication rules:
  * A review may be public only when:
@@ -113,6 +162,10 @@ import java.util.UUID;
 @AllArgsConstructor
 public class CustomerReview {
 
+    // =================================================================
+    // IDENTITY
+    // =================================================================
+
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     @Column(
@@ -122,6 +175,17 @@ public class CustomerReview {
     )
     private UUID customerReviewId;
 
+    // =================================================================
+    // REVIEW INVITATION
+    // =================================================================
+
+    /**
+     * Secure invitation used by the customer to submit the review.
+     *
+     * Null when an administrator records legitimate customer feedback
+     * received through another supported source such as phone, email,
+     * Google, or Facebook.
+     */
     @OneToOne(fetch = FetchType.LAZY)
     @JoinColumn(
             name = "review_invitation_id",
@@ -129,19 +193,76 @@ public class CustomerReview {
     )
     private CustomerReviewInvitation reviewInvitation;
 
+    // =================================================================
+    // COMPLETED BOOKING
+    // =================================================================
+
+    /**
+     * Completed service booking associated with this review.
+     *
+     * REQUIRED.
+     *
+     * Every customer review must be anchored to the actual completed
+     * BookingRequest that proves the customer received the service.
+     *
+     * The service layer is responsible for validating that the booking:
+     * - is COMPLETED;
+     * - has completedAt;
+     * - is review eligible;
+     * - has customerId;
+     * - has serviceId.
+     */
     @OneToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "booking_request_id", unique = true)
+    @JoinColumn(
+            name = "booking_request_id",
+            nullable = false,
+            unique = true
+    )
     private BookingRequest bookingRequest;
 
-    @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "contact_inquiry_id")
-    private ContactInquiry contactInquiry;
+    // =================================================================
+    // SERVICE
+    // =================================================================
 
+    /**
+     * Website service actually performed for the customer.
+     *
+     * REQUIRED.
+     *
+     * This relationship must be derived by the backend from:
+     *
+     * bookingRequest.serviceId
+     *
+     * It must never be independently selected or overridden by a
+     * public or administrator browser request.
+     */
     @ManyToOne(fetch = FetchType.LAZY)
-    @JoinColumn(name = "service_id")
+    @JoinColumn(
+            name = "service_id",
+            nullable = false
+    )
     private WebsiteService websiteService;
 
-    @Column(name = "reviewer_display_name", length = 180)
+    // =================================================================
+    // REVIEWER DISPLAY IDENTITY
+    // =================================================================
+
+    /**
+     * Internal customer name snapshot used for public display-name
+     * resolution.
+     *
+     * For standard display preferences this value is resolved from the
+     * reusable Customer associated with bookingRequest.customerId.
+     *
+     * For CUSTOM display preference this may contain the customer's
+     * explicitly selected display name.
+     *
+     * For ANONYMOUS this value may be null.
+     */
+    @Column(
+            name = "reviewer_display_name",
+            length = 180
+    )
     private String reviewerDisplayName;
 
     @Builder.Default
@@ -154,37 +275,135 @@ public class CustomerReview {
     private CustomerReviewDisplayPreference reviewerDisplayPreference =
             CustomerReviewDisplayPreference.FIRST_NAME_LAST_INITIAL;
 
-    @Column(name = "reviewer_email", length = 254)
+    // =================================================================
+    // CUSTOMER CONTACT SNAPSHOTS
+    // =================================================================
+
+    /**
+     * Customer email snapshot stored when the review is created.
+     *
+     * This value is resolved by the backend from the reusable Customer
+     * linked through bookingRequest.customerId.
+     *
+     * It is not editable through normal review-content updates.
+     */
+    @Column(
+            name = "reviewer_email",
+            length = 254
+    )
     private String reviewerEmail;
 
-    @Column(name = "reviewer_phone", length = 40)
+    /**
+     * Customer telephone snapshot stored when the review is created.
+     *
+     * This value is resolved by the backend from the reusable Customer
+     * linked through bookingRequest.customerId.
+     *
+     * It is not editable through normal review-content updates.
+     */
+    @Column(
+            name = "reviewer_phone",
+            length = 40
+    )
     private String reviewerPhone;
 
-    @Column(name = "review_title", length = 255)
+    // =================================================================
+    // REVIEW CONTENT
+    // =================================================================
+
+    @Column(
+            name = "review_title",
+            length = 255
+    )
     private String reviewTitle;
 
-    @Column(name = "review_text", columnDefinition = "text")
+    /**
+     * Customer's review/testimonial content.
+     *
+     * REQUIRED.
+     *
+     * Blank strings are normalized to null before entity validation,
+     * therefore both null and blank review text are rejected.
+     */
+    @Column(
+            name = "review_text",
+            nullable = false,
+            columnDefinition = "text"
+    )
     private String reviewText;
 
-    @Column(name = "rating", nullable = false)
+    @Column(
+            name = "rating",
+            nullable = false
+    )
     private Short rating;
 
+    // =================================================================
+    // REVIEW SOURCE
+    // =================================================================
+
+    /**
+     * Describes WHERE or HOW the customer communicated the feedback.
+     *
+     * Customer verification comes from the associated completed
+     * booking, not from this value.
+     */
     @Builder.Default
     @Enumerated(EnumType.STRING)
-    @Column(name = "review_source", nullable = false, length = 40)
+    @Column(
+            name = "review_source",
+            nullable = false,
+            length = 40
+    )
     private CustomerReviewSource reviewSource =
             CustomerReviewSource.WEBSITE;
 
-    @Column(name = "external_source_url", length = 1500)
+    /**
+     * Original external review URL when applicable.
+     *
+     * Examples:
+     * - Google review URL
+     * - Facebook recommendation URL
+     */
+    @Column(
+            name = "external_source_url",
+            length = 1500
+    )
     private String externalSourceUrl;
+
+    // =================================================================
+    // CUSTOMER PHOTO
+    // =================================================================
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "customer_photo_media_id")
     private WebsiteMediaAsset customerPhotoMedia;
 
+    // =================================================================
+    // VERIFIED CUSTOMER
+    // =================================================================
+
+    /**
+     * Indicates that the review is connected to a verified customer
+     * service relationship.
+     *
+     * For the active Romelt TechCare review workflow this value is
+     * established by the backend after validating the completed
+     * booking.
+     *
+     * It must never be controllable through public or administrator
+     * review DTOs.
+     */
     @Builder.Default
-    @Column(name = "is_verified_customer", nullable = false)
+    @Column(
+            name = "is_verified_customer",
+            nullable = false
+    )
     private Boolean isVerifiedCustomer = false;
+
+    // =================================================================
+    // CUSTOMER CONSENT
+    // =================================================================
 
     @Builder.Default
     @Column(
@@ -208,6 +427,10 @@ public class CustomerReview {
     )
     private String customerConsentIpAddress;
 
+    // =================================================================
+    // MODERATION
+    // =================================================================
+
     @Builder.Default
     @Enumerated(EnumType.STRING)
     @Column(
@@ -230,6 +453,10 @@ public class CustomerReview {
     )
     private String rejectionReason;
 
+    // =================================================================
+    // PUBLICATION
+    // =================================================================
+
     @Builder.Default
     @Column(
             name = "is_public",
@@ -244,6 +471,10 @@ public class CustomerReview {
     )
     private Boolean isFeatured = false;
 
+    // =================================================================
+    // ADMIN RESPONSE
+    // =================================================================
+
     @Column(
             name = "admin_response",
             columnDefinition = "text"
@@ -257,6 +488,10 @@ public class CustomerReview {
     @JoinColumn(name = "responded_by_admin_user_id")
     private AdminUser respondedByAdminUser;
 
+    // =================================================================
+    // SUBMISSION AUDIT
+    // =================================================================
+
     @Column(
             name = "submission_ip_address",
             length = 64
@@ -268,6 +503,10 @@ public class CustomerReview {
             length = 500
     )
     private String submissionUserAgent;
+
+    // =================================================================
+    // SPAM
+    // =================================================================
 
     @Column(
             name = "spam_score",
@@ -282,6 +521,10 @@ public class CustomerReview {
             nullable = false
     )
     private Boolean isSpam = false;
+
+    // =================================================================
+    // REVIEW LIFECYCLE
+    // =================================================================
 
     @Column(
             name = "submitted_at",
@@ -300,6 +543,10 @@ public class CustomerReview {
 
     @Column(name = "archived_at")
     private Instant archivedAt;
+
+    // =================================================================
+    // ADMINISTRATOR AUDIT RELATIONSHIPS
+    // =================================================================
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "created_by_admin_user_id")
@@ -325,6 +572,10 @@ public class CustomerReview {
     @JoinColumn(name = "archived_by_admin_user_id")
     private AdminUser archivedByAdminUser;
 
+    // =================================================================
+    // ENTITY AUDIT
+    // =================================================================
+
     @Column(
             name = "created_at",
             nullable = false,
@@ -344,6 +595,10 @@ public class CustomerReview {
             nullable = false
     )
     private Long rowVersion;
+
+    // =================================================================
+    // ENTITY LIFECYCLE
+    // =================================================================
 
     @PrePersist
     protected void onCreate() {
@@ -369,21 +624,39 @@ public class CustomerReview {
     protected void onUpdate() {
         initializeDefaults();
         normalizeFields();
+
         updatedAt = Instant.now();
+
         validateState();
     }
 
+    // =================================================================
+    // EDITABLE REVIEW CONTENT
+    // =================================================================
+
+    /**
+     * Updates administrator-editable review content.
+     *
+     * This operation intentionally does NOT accept or modify:
+     *
+     * - reviewerEmail
+     * - reviewerPhone
+     * - websiteService
+     * - bookingRequest
+     * - reviewInvitation
+     * - isVerifiedCustomer
+     *
+     * Those fields represent authoritative customer/service history
+     * established through the completed BookingRequest.
+     */
     public void updateContent(
             String newDisplayName,
             CustomerReviewDisplayPreference newDisplayPreference,
-            String newReviewerEmail,
-            String newReviewerPhone,
             String newReviewTitle,
             String newReviewText,
             Short newRating,
             CustomerReviewSource newReviewSource,
             String newExternalSourceUrl,
-            WebsiteService newWebsiteService,
             WebsiteMediaAsset newCustomerPhotoMedia,
             AdminUser administrator
     ) {
@@ -391,17 +664,23 @@ public class CustomerReview {
 
         reviewerDisplayName = newDisplayName;
         reviewerDisplayPreference = newDisplayPreference;
-        reviewerEmail = newReviewerEmail;
-        reviewerPhone = newReviewerPhone;
+
         reviewTitle = newReviewTitle;
         reviewText = newReviewText;
+
         rating = newRating;
+
         reviewSource = newReviewSource;
         externalSourceUrl = newExternalSourceUrl;
-        websiteService = newWebsiteService;
+
         customerPhotoMedia = newCustomerPhotoMedia;
+
         updatedByAdminUser = administrator;
     }
+
+    // =================================================================
+    // CONSENT
+    // =================================================================
 
     public void confirmConsent(
             String consentVersion,
@@ -409,9 +688,14 @@ public class CustomerReview {
     ) {
         customerConsentConfirmed = true;
         customerConsentConfirmedAt = Instant.now();
+
         customerConsentVersion = consentVersion;
         customerConsentIpAddress = ipAddress;
     }
+
+    // =================================================================
+    // MODERATION
+    // =================================================================
 
     public void approve(
             String notes,
@@ -419,15 +703,20 @@ public class CustomerReview {
     ) {
         ensureNotArchived();
 
-        moderationStatus = CustomerReviewModerationStatus.APPROVED;
+        moderationStatus =
+                CustomerReviewModerationStatus.APPROVED;
+
         moderationNotes = notes;
         rejectionReason = null;
+
         moderatedAt = Instant.now();
         moderatedByAdminUser = administrator;
 
         isSpam = false;
+
         hiddenAt = null;
         hiddenByAdminUser = null;
+
         archivedAt = null;
         archivedByAdminUser = null;
 
@@ -441,9 +730,12 @@ public class CustomerReview {
     ) {
         ensureNotArchived();
 
-        moderationStatus = CustomerReviewModerationStatus.REJECTED;
+        moderationStatus =
+                CustomerReviewModerationStatus.REJECTED;
+
         rejectionReason = reason;
         moderationNotes = notes;
+
         moderatedAt = Instant.now();
         moderatedByAdminUser = administrator;
 
@@ -459,10 +751,13 @@ public class CustomerReview {
     ) {
         ensureNotArchived();
 
-        moderationStatus = CustomerReviewModerationStatus.SPAM;
+        moderationStatus =
+                CustomerReviewModerationStatus.SPAM;
+
         isSpam = true;
         spamScore = newSpamScore;
         moderationNotes = notes;
+
         moderatedAt = Instant.now();
         moderatedByAdminUser = administrator;
 
@@ -471,23 +766,38 @@ public class CustomerReview {
         updatedByAdminUser = administrator;
     }
 
+    // =================================================================
+    // PUBLICATION
+    // =================================================================
+
     public void publish(
             boolean featured,
             AdminUser administrator
     ) {
-        if (moderationStatus != CustomerReviewModerationStatus.APPROVED) {
+        if (
+                moderationStatus
+                        != CustomerReviewModerationStatus.APPROVED
+        ) {
             throw new IllegalStateException(
                     "Only an approved review may be published."
             );
         }
 
-        if (!Boolean.TRUE.equals(customerConsentConfirmed)) {
+        if (
+                !Boolean.TRUE.equals(
+                        customerConsentConfirmed
+                )
+        ) {
             throw new IllegalStateException(
                     "Customer consent is required before publication."
             );
         }
 
-        if (Boolean.TRUE.equals(isSpam)) {
+        if (
+                Boolean.TRUE.equals(
+                        isSpam
+                )
+        ) {
             throw new IllegalStateException(
                     "A spam review cannot be published."
             );
@@ -495,6 +805,7 @@ public class CustomerReview {
 
         isPublic = true;
         isFeatured = featured;
+
         publishedAt = Instant.now();
         publishedByAdminUser = administrator;
 
@@ -509,8 +820,10 @@ public class CustomerReview {
     ) {
         isPublic = false;
         isFeatured = false;
+
         publishedAt = null;
         publishedByAdminUser = null;
+
         updatedByAdminUser = administrator;
     }
 
@@ -518,15 +831,25 @@ public class CustomerReview {
             boolean featured,
             AdminUser administrator
     ) {
-        if (featured && !Boolean.TRUE.equals(isPublic)) {
+        if (
+                featured
+                        && !Boolean.TRUE.equals(
+                        isPublic
+                )
+        ) {
             throw new IllegalStateException(
                     "Only a public review may be featured."
             );
         }
 
         isFeatured = featured;
+
         updatedByAdminUser = administrator;
     }
+
+    // =================================================================
+    // VISIBILITY / ARCHIVAL
+    // =================================================================
 
     public void hide(
             String notes,
@@ -534,8 +857,11 @@ public class CustomerReview {
     ) {
         ensureNotArchived();
 
-        moderationStatus = CustomerReviewModerationStatus.HIDDEN;
+        moderationStatus =
+                CustomerReviewModerationStatus.HIDDEN;
+
         moderationNotes = notes;
+
         hiddenAt = Instant.now();
         hiddenByAdminUser = administrator;
 
@@ -547,7 +873,9 @@ public class CustomerReview {
     public void archive(
             AdminUser administrator
     ) {
-        moderationStatus = CustomerReviewModerationStatus.ARCHIVED;
+        moderationStatus =
+                CustomerReviewModerationStatus.ARCHIVED;
+
         archivedAt = Instant.now();
         archivedByAdminUser = administrator;
 
@@ -556,13 +884,19 @@ public class CustomerReview {
         updatedByAdminUser = administrator;
     }
 
+    // =================================================================
+    // ADMIN RESPONSE
+    // =================================================================
+
     public void addAdminResponse(
             String response,
             AdminUser administrator
     ) {
         adminResponse = response;
+
         respondedAt = Instant.now();
         respondedByAdminUser = administrator;
+
         updatedByAdminUser = administrator;
     }
 
@@ -570,29 +904,52 @@ public class CustomerReview {
             AdminUser administrator
     ) {
         adminResponse = null;
+
         respondedAt = null;
         respondedByAdminUser = null;
+
         updatedByAdminUser = administrator;
     }
 
+    // =================================================================
+    // PUBLIC VISIBILITY
+    // =================================================================
+
     public boolean isPubliclyVisible() {
-        return moderationStatus == CustomerReviewModerationStatus.APPROVED
-                && Boolean.TRUE.equals(isPublic)
-                && Boolean.TRUE.equals(customerConsentConfirmed)
-                && !Boolean.TRUE.equals(isSpam)
+        return moderationStatus
+                == CustomerReviewModerationStatus.APPROVED
+
+                && Boolean.TRUE.equals(
+                isPublic
+        )
+
+                && Boolean.TRUE.equals(
+                customerConsentConfirmed
+        )
+
+                && !Boolean.TRUE.equals(
+                isSpam
+        )
+
                 && publishedAt != null;
     }
 
     private void removeFromPublicDisplay() {
         isPublic = false;
         isFeatured = false;
+
         publishedAt = null;
         publishedByAdminUser = null;
     }
 
+    // =================================================================
+    // STATE GUARDS
+    // =================================================================
+
     private void ensureEditable() {
         if (
-                moderationStatus == CustomerReviewModerationStatus.ARCHIVED
+                moderationStatus
+                        == CustomerReviewModerationStatus.ARCHIVED
         ) {
             throw new IllegalStateException(
                     "An archived review cannot be edited."
@@ -602,13 +959,18 @@ public class CustomerReview {
 
     private void ensureNotArchived() {
         if (
-                moderationStatus == CustomerReviewModerationStatus.ARCHIVED
+                moderationStatus
+                        == CustomerReviewModerationStatus.ARCHIVED
         ) {
             throw new IllegalStateException(
                     "An archived review cannot be moderated."
             );
         }
     }
+
+    // =================================================================
+    // DEFAULTS
+    // =================================================================
 
     private void initializeDefaults() {
         if (reviewerDisplayPreference == null) {
@@ -618,7 +980,8 @@ public class CustomerReview {
         }
 
         if (reviewSource == null) {
-            reviewSource = CustomerReviewSource.WEBSITE;
+            reviewSource =
+                    CustomerReviewSource.WEBSITE;
         }
 
         if (moderationStatus == null) {
@@ -647,57 +1010,135 @@ public class CustomerReview {
         }
     }
 
+    // =================================================================
+    // NORMALIZATION
+    // =================================================================
+
     private void normalizeFields() {
         reviewerDisplayName =
-                normalizeOptional(reviewerDisplayName);
+                normalizeOptional(
+                        reviewerDisplayName
+                );
 
         reviewerEmail =
-                normalizeEmail(reviewerEmail);
+                normalizeEmail(
+                        reviewerEmail
+                );
 
         reviewerPhone =
-                normalizeOptional(reviewerPhone);
+                normalizeOptional(
+                        reviewerPhone
+                );
 
         reviewTitle =
-                normalizeOptional(reviewTitle);
+                normalizeOptional(
+                        reviewTitle
+                );
 
         reviewText =
-                normalizeOptional(reviewText);
+                normalizeOptional(
+                        reviewText
+                );
 
         externalSourceUrl =
-                normalizeOptional(externalSourceUrl);
+                normalizeOptional(
+                        externalSourceUrl
+                );
 
         customerConsentVersion =
-                normalizeOptional(customerConsentVersion);
+                normalizeOptional(
+                        customerConsentVersion
+                );
 
         customerConsentIpAddress =
-                normalizeOptional(customerConsentIpAddress);
+                normalizeOptional(
+                        customerConsentIpAddress
+                );
 
         moderationNotes =
-                normalizeOptional(moderationNotes);
+                normalizeOptional(
+                        moderationNotes
+                );
 
         rejectionReason =
-                normalizeOptional(rejectionReason);
+                normalizeOptional(
+                        rejectionReason
+                );
 
         adminResponse =
-                normalizeOptional(adminResponse);
+                normalizeOptional(
+                        adminResponse
+                );
 
         submissionIpAddress =
-                normalizeOptional(submissionIpAddress);
+                normalizeOptional(
+                        submissionIpAddress
+                );
 
         submissionUserAgent =
-                normalizeOptional(submissionUserAgent);
+                normalizeOptional(
+                        submissionUserAgent
+                );
     }
 
+    // =================================================================
+    // ENTITY VALIDATION
+    // =================================================================
+
     private void validateState() {
-        if (rating == null || rating < 1 || rating > 5) {
+
+        // -------------------------------------------------------------
+        // REQUIRED COMPLETED-SERVICE RELATIONSHIPS
+        // -------------------------------------------------------------
+
+        if (bookingRequest == null) {
+            throw new IllegalStateException(
+                    "Customer review must be associated with a completed booking."
+            );
+        }
+
+        if (websiteService == null) {
+            throw new IllegalStateException(
+                    "Customer review must be associated with the service performed."
+            );
+        }
+
+        // -------------------------------------------------------------
+        // RATING
+        // -------------------------------------------------------------
+
+        if (
+                rating == null
+                        || rating < 1
+                        || rating > 5
+        ) {
             throw new IllegalStateException(
                     "Rating must be between 1 and 5."
             );
         }
 
+        // -------------------------------------------------------------
+        // REVIEW TEXT
+        // -------------------------------------------------------------
+
+        /*
+         * normalizeFields() converts blank review text to null before
+         * this validation executes.
+         */
+        if (reviewText == null) {
+            throw new IllegalStateException(
+                    "Review text is required."
+            );
+        }
+
+        // -------------------------------------------------------------
+        // DISPLAY NAME
+        // -------------------------------------------------------------
+
         if (
                 reviewerDisplayPreference
                         != CustomerReviewDisplayPreference.ANONYMOUS
+
                         && reviewerDisplayName == null
         ) {
             throw new IllegalStateException(
@@ -705,8 +1146,14 @@ public class CustomerReview {
             );
         }
 
+        // -------------------------------------------------------------
+        // CONSENT
+        // -------------------------------------------------------------
+
         if (
-                customerConsentConfirmed
+                Boolean.TRUE.equals(
+                        customerConsentConfirmed
+                )
                         && (
                         customerConsentConfirmedAt == null
                                 || customerConsentVersion == null
@@ -717,7 +1164,15 @@ public class CustomerReview {
             );
         }
 
-        if (Boolean.TRUE.equals(isPublic)) {
+        // -------------------------------------------------------------
+        // PUBLIC REVIEW STATE
+        // -------------------------------------------------------------
+
+        if (
+                Boolean.TRUE.equals(
+                        isPublic
+                )
+        ) {
             if (
                     moderationStatus
                             != CustomerReviewModerationStatus.APPROVED
@@ -727,32 +1182,60 @@ public class CustomerReview {
                 );
             }
 
-            if (!Boolean.TRUE.equals(customerConsentConfirmed)) {
+            if (
+                    !Boolean.TRUE.equals(
+                            customerConsentConfirmed
+                    )
+            ) {
                 throw new IllegalStateException(
                         "A public review requires customer consent."
                 );
             }
 
-            if (Boolean.TRUE.equals(isSpam)) {
+            if (
+                    Boolean.TRUE.equals(
+                            isSpam
+                    )
+            ) {
                 throw new IllegalStateException(
                         "A spam review cannot be public."
                 );
             }
+
+            if (publishedAt == null) {
+                throw new IllegalStateException(
+                        "A public review requires a publication timestamp."
+                );
+            }
         }
 
+        // -------------------------------------------------------------
+        // FEATURED STATE
+        // -------------------------------------------------------------
+
         if (
-                Boolean.TRUE.equals(isFeatured)
-                        && !Boolean.TRUE.equals(isPublic)
+                Boolean.TRUE.equals(
+                        isFeatured
+                )
+                        && !Boolean.TRUE.equals(
+                        isPublic
+                )
         ) {
             throw new IllegalStateException(
                     "A featured review must be public."
             );
         }
 
+        // -------------------------------------------------------------
+        // PUBLICATION TIMESTAMP
+        // -------------------------------------------------------------
+
         if (
                 publishedAt != null
                         && (
-                        !Boolean.TRUE.equals(isPublic)
+                        !Boolean.TRUE.equals(
+                                isPublic
+                        )
                                 || moderationStatus
                                 != CustomerReviewModerationStatus.APPROVED
                 )
@@ -762,6 +1245,10 @@ public class CustomerReview {
             );
         }
 
+        // -------------------------------------------------------------
+        // ADMINISTRATOR RESPONSE
+        // -------------------------------------------------------------
+
         if (
                 respondedAt != null
                         && adminResponse == null
@@ -770,6 +1257,10 @@ public class CustomerReview {
                     "A response timestamp requires an administrator response."
             );
         }
+
+        // -------------------------------------------------------------
+        // HIDDEN STATE
+        // -------------------------------------------------------------
 
         if (
                 moderationStatus
@@ -781,6 +1272,10 @@ public class CustomerReview {
             );
         }
 
+        // -------------------------------------------------------------
+        // ARCHIVED STATE
+        // -------------------------------------------------------------
+
         if (
                 moderationStatus
                         == CustomerReviewModerationStatus.ARCHIVED
@@ -791,10 +1286,17 @@ public class CustomerReview {
             );
         }
 
+        // -------------------------------------------------------------
+        // SPAM SCORE
+        // -------------------------------------------------------------
+
         if (
                 spamScore != null
                         && (
-                        spamScore.compareTo(BigDecimal.ZERO) < 0
+                        spamScore.compareTo(
+                                BigDecimal.ZERO
+                        ) < 0
+
                                 || spamScore.compareTo(
                                 BigDecimal.valueOf(100)
                         ) > 0
@@ -806,14 +1308,23 @@ public class CustomerReview {
         }
     }
 
+    // =================================================================
+    // NORMALIZATION HELPERS
+    // =================================================================
+
     private String normalizeEmail(
             String value
     ) {
-        String normalized = normalizeOptional(value);
+        String normalized =
+                normalizeOptional(
+                        value
+                );
 
         return normalized == null
                 ? null
-                : normalized.toLowerCase(Locale.ROOT);
+                : normalized.toLowerCase(
+                Locale.ROOT
+        );
     }
 
     private String normalizeOptional(
@@ -823,7 +1334,8 @@ public class CustomerReview {
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null

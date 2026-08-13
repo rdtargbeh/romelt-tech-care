@@ -3,6 +3,7 @@ package romelt_techcare.backend.service.implement;
 import com.fasterxml.jackson.databind.JsonNode;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import romelt_techcare.backend.dto.ContactInquiryConfirmationResponse;
@@ -10,6 +11,7 @@ import romelt_techcare.backend.dto.ContactInquiryCreateRequest;
 import romelt_techcare.backend.entity.ContactInquiry;
 import romelt_techcare.backend.enums.WebsiteContentAuditAction;
 import romelt_techcare.backend.enums.WebsiteContentAuditResourceType;
+import romelt_techcare.backend.event.ContactInquirySubmittedEvent;
 import romelt_techcare.backend.mapper.ContactInquiryMapper;
 import romelt_techcare.backend.repository.ContactInquiryRepository;
 import romelt_techcare.backend.service.ContactInquiryService;
@@ -31,12 +33,23 @@ import java.util.Map;
  * Processes and stores public contact inquiries.
  *
  * Responsibilities:
- * - Generates a customer-facing reference number.
+ * - Validates incoming public inquiry requests.
+ * - Generates a unique customer-facing reference number.
  * - Normalizes and stores accepted inquiries.
- * - Returns a safe confirmation response.
  * - Records an immutable content audit event.
- * - Provides future integration points for notifications and spam
- *   processing.
+ * - Publishes a contact-inquiry-submitted application event.
+ * - Returns a safe public confirmation response.
+ *
+ * Notification behavior:
+ * This service does not send email, SMS, or in-app notifications
+ * directly.
+ *
+ * After the inquiry transaction commits successfully,
+ * ContactNotificationListener handles ContactInquirySubmittedEvent
+ * and delegates notification delivery to ContactNotificationService.
+ *
+ * This prevents email or SMS provider failures from rolling back a
+ * valid customer inquiry.
  *
  * Reference format:
  * RTCI-YYYY-XXXXXXXX
@@ -48,8 +61,11 @@ import java.util.Map;
 public class ContactInquiryServiceImpl
         implements ContactInquiryService {
 
-    private static final String REFERENCE_PREFIX = "RTCI";
-    private static final int MAX_REFERENCE_ATTEMPTS = 10;
+    private static final String REFERENCE_PREFIX =
+            "RTCI";
+
+    private static final int MAX_REFERENCE_ATTEMPTS =
+            10;
 
     private final ContactInquiryRepository
             contactInquiryRepository;
@@ -63,19 +79,31 @@ public class ContactInquiryServiceImpl
     private final WebsiteContentAuditSnapshotService
             websiteContentAuditSnapshotService;
 
+    private final ApplicationEventPublisher
+            applicationEventPublisher;
+
     private final SecureRandom secureRandom =
             new SecureRandom();
 
+    /**
+     * Creates a public contact inquiry.
+     *
+     * Processing order:
+     * 1. Validate the incoming request.
+     * 2. Generate a unique inquiry reference.
+     * 3. Map and persist the inquiry.
+     * 4. Record an immutable audit entry.
+     * 5. Publish the submitted event.
+     * 6. Return the customer confirmation response.
+     *
+     * The notification listener executes after transaction commit.
+     */
     @Override
     @Transactional
     public ContactInquiryConfirmationResponse createInquiry(
             ContactInquiryCreateRequest request
     ) {
-        if (request == null) {
-            throw new IllegalArgumentException(
-                    "Contact inquiry information is required."
-            );
-        }
+        requireCreateRequest(request);
 
         String referenceNumber =
                 generateUniqueReferenceNumber();
@@ -91,8 +119,12 @@ public class ContactInquiryServiceImpl
                         inquiry
                 );
 
+        requirePersistedInquiry(savedInquiry);
+
         JsonNode afterSnapshot =
-                createInquirySnapshot(savedInquiry);
+                createInquirySnapshot(
+                        savedInquiry
+                );
 
         websiteContentAuditLogService.recordAudit(
                 null,
@@ -106,26 +138,45 @@ public class ContactInquiryServiceImpl
                 null
         );
 
-        log.info(
-                "Public contact inquiry created. inquiryId={}, referenceNumber={}",
-                savedInquiry.getContactInquiryId(),
-                savedInquiry.getReferenceNumber()
+        /*
+         * Published inside the active transaction.
+         *
+         * ContactNotificationListener uses:
+         * @TransactionalEventListener(AFTER_COMMIT)
+         *
+         * Therefore, notifications are processed only when this
+         * transaction commits successfully.
+         */
+        applicationEventPublisher.publishEvent(
+                new ContactInquirySubmittedEvent(
+                        savedInquiry
+                )
         );
 
-        /*
-         * Future production integrations:
-         * - Notify the business owner by email.
-         * - Send a customer acknowledgement email.
-         * - Run anti-spam and rate-limit checks.
-         */
+        log.info(
+                "Public contact inquiry created and notification event published. inquiryId={}, referenceNumber={}, status={}",
+                savedInquiry.getContactInquiryId(),
+                savedInquiry.getReferenceNumber(),
+                savedInquiry.getStatus()
+        );
 
         return contactInquiryMapper
-                .toConfirmationResponse(savedInquiry);
+                .toConfirmationResponse(
+                        savedInquiry
+                );
     }
 
+    /**
+     * Creates a non-sensitive audit snapshot.
+     *
+     * The complete customer message, email address, telephone number,
+     * IP address, and request metadata are intentionally excluded.
+     */
     private JsonNode createInquirySnapshot(
             ContactInquiry inquiry
     ) {
+        requirePersistedInquiry(inquiry);
+
         Map<String, Object> fields =
                 new LinkedHashMap<>();
 
@@ -144,10 +195,43 @@ public class ContactInquiryServiceImpl
                 inquiry.getStatus()
         );
 
+        fields.put(
+                "subject",
+                inquiry.getSubject()
+        );
+
+        fields.put(
+                "serviceType",
+                inquiry.getServiceType()
+        );
+
+        fields.put(
+                "preferredContactMethod",
+                inquiry.getPreferredContactMethod()
+        );
+
+        fields.put(
+                "submittedAt",
+                inquiry.getSubmittedAt()
+        );
+
+        fields.put(
+                "createdAt",
+                inquiry.getCreatedAt()
+        );
+
+        fields.put(
+                "updatedAt",
+                inquiry.getUpdatedAt()
+        );
+
         return websiteContentAuditSnapshotService
                 .createSnapshot(fields);
     }
 
+    /**
+     * Generates a unique customer-facing inquiry reference number.
+     */
     private String generateUniqueReferenceNumber() {
         for (
                 int attempt = 0;
@@ -159,7 +243,9 @@ public class ContactInquiryServiceImpl
 
             if (
                     !contactInquiryRepository
-                            .existsByReferenceNumber(referenceNumber)
+                            .existsByReferenceNumber(
+                                    referenceNumber
+                            )
             ) {
                 return referenceNumber;
             }
@@ -170,30 +256,98 @@ public class ContactInquiryServiceImpl
         );
     }
 
+    /**
+     * Creates one candidate inquiry reference.
+     */
     private String createReferenceNumber() {
-        String randomSegment = Long
-                .toUnsignedString(
-                        secureRandom.nextLong(),
-                        36
-                )
-                .toUpperCase(Locale.ROOT)
-                .replace("-", "");
+        String randomSegment =
+                Long.toUnsignedString(
+                                secureRandom.nextLong(),
+                                36
+                        )
+                        .toUpperCase(Locale.ROOT)
+                        .replace("-", "");
 
         if (randomSegment.length() < 8) {
             randomSegment =
                     String.format(
-                            "%8s",
-                            randomSegment
-                    ).replace(' ', '0');
+                                    "%8s",
+                                    randomSegment
+                            )
+                            .replace(' ', '0');
         }
 
         randomSegment =
-                randomSegment.substring(0, 8);
+                randomSegment.substring(
+                        0,
+                        8
+                );
 
         return "%s-%d-%s".formatted(
                 REFERENCE_PREFIX,
                 Year.now().getValue(),
                 randomSegment
         );
+    }
+
+    /**
+     * Validates the incoming public create command.
+     */
+    private void requireCreateRequest(
+            ContactInquiryCreateRequest request
+    ) {
+        if (request == null) {
+            throw new IllegalArgumentException(
+                    "Contact inquiry information is required."
+            );
+        }
+    }
+
+    /**
+     * Ensures notification and audit operations receive a persisted
+     * inquiry.
+     */
+    private void requirePersistedInquiry(
+            ContactInquiry inquiry
+    ) {
+        if (
+                inquiry == null
+                        || inquiry.getContactInquiryId() == null
+        ) {
+            throw new IllegalArgumentException(
+                    "A persisted contact inquiry is required."
+            );
+        }
+
+        if (
+                normalizeOptional(
+                        inquiry.getReferenceNumber()
+                ) == null
+        ) {
+            throw new IllegalArgumentException(
+                    "Contact inquiry reference number is required."
+            );
+        }
+
+        if (inquiry.getStatus() == null) {
+            throw new IllegalArgumentException(
+                    "Contact inquiry status is required."
+            );
+        }
+    }
+
+    private String normalizeOptional(
+            String value
+    ) {
+        if (value == null) {
+            return null;
+        }
+
+        String normalized =
+                value.trim();
+
+        return normalized.isEmpty()
+                ? null
+                : normalized;
     }
 }

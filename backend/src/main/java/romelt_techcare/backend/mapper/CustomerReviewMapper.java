@@ -9,7 +9,6 @@ import romelt_techcare.backend.dto.PublicCustomerReviewResponse;
 import romelt_techcare.backend.dto.PublicWebsiteMediaAssetResponse;
 import romelt_techcare.backend.entity.AdminUser;
 import romelt_techcare.backend.entity.BookingRequest;
-import romelt_techcare.backend.entity.ContactInquiry;
 import romelt_techcare.backend.entity.CustomerReview;
 import romelt_techcare.backend.entity.CustomerReviewInvitation;
 import romelt_techcare.backend.entity.WebsiteService;
@@ -22,13 +21,70 @@ import java.util.UUID;
  * ================================================================
  *
  * Purpose:
- * Maps review requests into service-compatible entities and persisted
- * reviews into administrator and public responses.
+ * Maps customer-review request DTOs into service-compatible entities
+ * and persisted CustomerReview records into administrator and public
+ * responses.
+ *
+ * Core business rule:
+ * Every Romelt TechCare customer review represents feedback about an
+ * actual completed, review-eligible BookingRequest.
+ *
+ * Review ownership:
+ *
+ * Customer
+ *      -> BookingRequest
+ *          -> WebsiteService
+ *              -> CustomerReview
+ *
+ * ContactInquiry is intentionally not part of review ownership.
+ *
+ * Administrator-created review mapping:
+ * The administrator request supplies only review-specific information:
+ * - display preference;
+ * - optional custom display name;
+ * - review title;
+ * - review text;
+ * - rating;
+ * - review source;
+ * - optional external source URL;
+ * - consent information.
+ *
+ * The following values are NOT trusted from the browser:
+ * - BookingRequest relationship;
+ * - customer identity;
+ * - customer email;
+ * - customer telephone number;
+ * - WebsiteService relationship;
+ * - verified-customer status.
+ *
+ * CustomerReviewService resolves those authoritative values from the
+ * completed booking and its linked reusable Customer record.
+ *
+ * Review source:
+ * Review source describes WHERE or HOW the customer communicated the
+ * feedback.
+ *
+ * Examples:
+ * - BOOKING_FOLLOW_UP
+ * - PHONE
+ * - EMAIL
+ * - GOOGLE
+ * - FACEBOOK
+ * - OTHER
+ *
+ * Review source does not establish customer verification.
+ * Verification comes from the completed booking/customer relationship.
  *
  * Security:
- * Public mapping excludes email, phone, IP addresses, user agents,
- * consent evidence, moderation notes, rejection reasons, and internal
- * administrator metadata.
+ * Public mapping excludes:
+ * - customer email;
+ * - customer phone;
+ * - IP addresses;
+ * - user agents;
+ * - consent evidence;
+ * - moderation notes;
+ * - rejection reasons;
+ * - internal administrator metadata.
  * ================================================================
  */
 @Component
@@ -37,6 +93,29 @@ public class CustomerReviewMapper {
 
     private final WebsiteMediaAssetMapper websiteMediaAssetMapper;
 
+    // =================================================================
+    // ADMIN CREATE REQUEST -> SERVICE-COMPATIBLE ENTITY
+    // =================================================================
+
+    /**
+     * Maps administrator-provided review content.
+     *
+     * This deliberately does NOT populate:
+     *
+     * - bookingRequest
+     * - websiteService
+     * - reviewerEmail
+     * - reviewerPhone
+     * - isVerifiedCustomer
+     *
+     * Those values are authoritative business data and must be resolved
+     * by CustomerReviewService from the completed booking and reusable
+     * Customer record.
+     *
+     * bookingRequestId and customerPhotoMediaId are passed separately
+     * to the service and therefore are not mapped directly onto this
+     * temporary CustomerReview entity.
+     */
     public CustomerReview toEntity(
             CustomerReviewAdminCreateRequest request
     ) {
@@ -51,19 +130,20 @@ public class CustomerReviewMapper {
                 .reviewerDisplayPreference(
                         request.reviewerDisplayPreference()
                 )
-                .reviewerEmail(request.reviewerEmail())
-                .reviewerPhone(request.reviewerPhone())
-                .reviewTitle(request.reviewTitle())
-                .reviewText(request.reviewText())
-                .rating(request.rating())
-                .reviewSource(request.reviewSource())
+                .reviewTitle(
+                        request.reviewTitle()
+                )
+                .reviewText(
+                        request.reviewText()
+                )
+                .rating(
+                        request.rating()
+                )
+                .reviewSource(
+                        request.reviewSource()
+                )
                 .externalSourceUrl(
                         request.externalSourceUrl()
-                )
-                .isVerifiedCustomer(
-                        Boolean.TRUE.equals(
-                                request.isVerifiedCustomer()
-                        )
                 )
                 .customerConsentConfirmed(
                         Boolean.TRUE.equals(
@@ -76,6 +156,33 @@ public class CustomerReviewMapper {
                 .build();
     }
 
+    // =================================================================
+    // ADMIN UPDATE REQUEST -> SERVICE-COMPATIBLE ENTITY
+    // =================================================================
+
+    /**
+     * Maps administrator-editable review content.
+     *
+     * Normal review updates may change:
+     * - display name;
+     * - display preference;
+     * - title;
+     * - review text;
+     * - rating;
+     * - review source;
+     * - external source URL.
+     *
+     * Normal review updates may NOT change:
+     * - booking;
+     * - customer identity;
+     * - customer email;
+     * - customer phone;
+     * - service;
+     * - verified-customer status.
+     *
+     * customerPhotoMediaId is passed separately to the service because
+     * it must first be resolved to a WebsiteMediaAsset.
+     */
     public CustomerReview toUpdateEntity(
             CustomerReviewUpdateRequest request
     ) {
@@ -90,18 +197,36 @@ public class CustomerReviewMapper {
                 .reviewerDisplayPreference(
                         request.reviewerDisplayPreference()
                 )
-                .reviewerEmail(request.reviewerEmail())
-                .reviewerPhone(request.reviewerPhone())
-                .reviewTitle(request.reviewTitle())
-                .reviewText(request.reviewText())
-                .rating(request.rating())
-                .reviewSource(request.reviewSource())
+                .reviewTitle(
+                        request.reviewTitle()
+                )
+                .reviewText(
+                        request.reviewText()
+                )
+                .rating(
+                        request.rating()
+                )
+                .reviewSource(
+                        request.reviewSource()
+                )
                 .externalSourceUrl(
                         request.externalSourceUrl()
                 )
                 .build();
     }
 
+    // =================================================================
+    // ADMIN RESPONSE
+    // =================================================================
+
+    /**
+     * Maps a persisted CustomerReview into the complete administrator
+     * response.
+     *
+     * The response exposes the authoritative booking/service
+     * relationships and private review-management information required
+     * by the administrator interface.
+     */
     public CustomerReviewResponse toResponse(
             CustomerReview review
     ) {
@@ -115,88 +240,181 @@ public class CustomerReviewMapper {
         BookingRequest booking =
                 review.getBookingRequest();
 
-        ContactInquiry inquiry =
-                review.getContactInquiry();
-
         WebsiteService service =
                 review.getWebsiteService();
 
         return new CustomerReviewResponse(
                 review.getCustomerReviewId(),
+
                 invitation == null
                         ? null
                         : invitation.getReviewInvitationId(),
+
                 booking == null
                         ? null
                         : booking.getBookingRequestId(),
+
                 booking == null
                         ? null
                         : booking.getReferenceNumber(),
-                inquiry == null
-                        ? null
-                        : inquiry.getContactInquiryId(),
+
                 service == null
                         ? null
                         : service.getServiceId(),
+
                 service == null
                         ? null
                         : service.getServiceCode(),
+
                 service == null
                         ? null
                         : service.getServiceSlug(),
+
                 review.getReviewerDisplayName(),
-                resolvePublicDisplayName(review),
+
+                resolvePublicDisplayName(
+                        review
+                ),
+
                 review.getReviewerDisplayPreference(),
+
                 review.getReviewerEmail(),
+
                 review.getReviewerPhone(),
+
                 review.getReviewTitle(),
+
                 review.getReviewText(),
+
                 review.getRating(),
+
                 review.getReviewSource(),
+
                 review.getExternalSourceUrl(),
-                publicMedia(review),
+
+                publicMedia(
+                        review
+                ),
+
                 review.getIsVerifiedCustomer(),
+
                 review.getCustomerConsentConfirmed(),
+
                 review.getCustomerConsentConfirmedAt(),
+
                 review.getCustomerConsentVersion(),
+
                 review.getCustomerConsentIpAddress(),
+
                 review.getModerationStatus(),
+
                 review.getModerationNotes(),
+
                 review.getRejectionReason(),
+
                 review.getIsPublic(),
+
                 review.getIsFeatured(),
+
                 review.isPubliclyVisible(),
+
                 review.getAdminResponse(),
+
                 review.getRespondedAt(),
-                adminId(review.getRespondedByAdminUser()),
-                adminName(review.getRespondedByAdminUser()),
+
+                adminId(
+                        review.getRespondedByAdminUser()
+                ),
+
+                adminName(
+                        review.getRespondedByAdminUser()
+                ),
+
                 review.getSubmissionIpAddress(),
+
                 review.getSubmissionUserAgent(),
+
                 review.getSpamScore(),
+
                 review.getIsSpam(),
+
                 review.getSubmittedAt(),
+
                 review.getModeratedAt(),
+
                 review.getPublishedAt(),
+
                 review.getHiddenAt(),
+
                 review.getArchivedAt(),
-                adminId(review.getCreatedByAdminUser()),
-                adminName(review.getCreatedByAdminUser()),
-                adminId(review.getUpdatedByAdminUser()),
-                adminName(review.getUpdatedByAdminUser()),
-                adminId(review.getModeratedByAdminUser()),
-                adminName(review.getModeratedByAdminUser()),
-                adminId(review.getPublishedByAdminUser()),
-                adminName(review.getPublishedByAdminUser()),
-                adminId(review.getHiddenByAdminUser()),
-                adminName(review.getHiddenByAdminUser()),
-                adminId(review.getArchivedByAdminUser()),
-                adminName(review.getArchivedByAdminUser()),
+
+                adminId(
+                        review.getCreatedByAdminUser()
+                ),
+
+                adminName(
+                        review.getCreatedByAdminUser()
+                ),
+
+                adminId(
+                        review.getUpdatedByAdminUser()
+                ),
+
+                adminName(
+                        review.getUpdatedByAdminUser()
+                ),
+
+                adminId(
+                        review.getModeratedByAdminUser()
+                ),
+
+                adminName(
+                        review.getModeratedByAdminUser()
+                ),
+
+                adminId(
+                        review.getPublishedByAdminUser()
+                ),
+
+                adminName(
+                        review.getPublishedByAdminUser()
+                ),
+
+                adminId(
+                        review.getHiddenByAdminUser()
+                ),
+
+                adminName(
+                        review.getHiddenByAdminUser()
+                ),
+
+                adminId(
+                        review.getArchivedByAdminUser()
+                ),
+
+                adminName(
+                        review.getArchivedByAdminUser()
+                ),
+
                 review.getCreatedAt(),
+
                 review.getUpdatedAt(),
+
                 review.getRowVersion()
         );
     }
 
+    // =================================================================
+    // PUBLIC RESPONSE
+    // =================================================================
+
+    /**
+     * Creates the safe public representation of an approved,
+     * published review.
+     *
+     * Private customer identity/contact information is deliberately
+     * excluded.
+     */
     public PublicCustomerReviewResponse toPublicResponse(
             CustomerReview review
     ) {
@@ -209,27 +427,56 @@ public class CustomerReviewMapper {
 
         return new PublicCustomerReviewResponse(
                 review.getCustomerReviewId(),
-                resolvePublicDisplayName(review),
+
+                resolvePublicDisplayName(
+                        review
+                ),
+
                 review.getReviewTitle(),
+
                 review.getReviewText(),
+
                 review.getRating(),
+
                 review.getReviewSource(),
+
                 review.getExternalSourceUrl(),
-                publicMedia(review),
+
+                publicMedia(
+                        review
+                ),
+
                 review.getIsVerifiedCustomer(),
+
                 review.getIsFeatured(),
+
                 service == null
                         ? null
                         : service.getServiceCode(),
+
                 service == null
                         ? null
                         : service.getServiceSlug(),
+
                 review.getAdminResponse(),
+
                 review.getRespondedAt(),
+
                 review.getPublishedAt()
         );
     }
 
+    // =================================================================
+    // PUBLIC DISPLAY NAME
+    // =================================================================
+
+    /**
+     * Resolves the name that may safely be shown publicly according to
+     * the customer's selected display preference.
+     *
+     * reviewerDisplayName stores the internally resolved or
+     * customer-authorized name snapshot.
+     */
     public String resolvePublicDisplayName(
             CustomerReview review
     ) {
@@ -242,22 +489,43 @@ public class CustomerReviewMapper {
                         review.getReviewerDisplayName()
                 );
 
+        if (
+                review.getReviewerDisplayPreference()
+                        == null
+        ) {
+            return name;
+        }
+
         return switch (
                 review.getReviewerDisplayPreference()
                 ) {
-            case ANONYMOUS -> "Anonymous Customer";
+            case ANONYMOUS ->
+                    "Anonymous Customer";
 
             case FIRST_NAME_ONLY ->
-                    firstName(name);
+                    firstName(
+                            name
+                    );
 
             case FIRST_NAME_LAST_INITIAL ->
-                    firstNameLastInitial(name);
+                    firstNameLastInitial(
+                            name
+                    );
 
             case FULL_NAME,
-                 CUSTOM -> name;
+                 CUSTOM ->
+                    name;
         };
     }
 
+    // =================================================================
+    // PUBLIC MEDIA
+    // =================================================================
+
+    /**
+     * Converts the optional customer review photo into its safe public
+     * media representation.
+     */
     private PublicWebsiteMediaAssetResponse publicMedia(
             CustomerReview review
     ) {
@@ -268,10 +536,15 @@ public class CustomerReviewMapper {
             return null;
         }
 
-        return websiteMediaAssetMapper.toPublicResponse(
-                review.getCustomerPhotoMedia()
-        );
+        return websiteMediaAssetMapper
+                .toPublicResponse(
+                        review.getCustomerPhotoMedia()
+                );
     }
+
+    // =================================================================
+    // NAME HELPERS
+    // =================================================================
 
     private String firstName(
             String value
@@ -281,7 +554,9 @@ public class CustomerReviewMapper {
         }
 
         String[] parts =
-                value.trim().split("\\s+");
+                value
+                        .trim()
+                        .split("\\s+");
 
         return parts.length == 0
                 ? null
@@ -296,7 +571,9 @@ public class CustomerReviewMapper {
         }
 
         String[] parts =
-                value.trim().split("\\s+");
+                value
+                        .trim()
+                        .split("\\s+");
 
         if (parts.length == 0) {
             return null;
@@ -306,13 +583,26 @@ public class CustomerReviewMapper {
             return parts[0];
         }
 
+        String lastName =
+                parts[
+                        parts.length - 1
+                        ];
+
+        if (lastName.isBlank()) {
+            return parts[0];
+        }
+
         return parts[0]
                 + " "
                 + Character.toUpperCase(
-                parts[parts.length - 1].charAt(0)
+                lastName.charAt(0)
         )
                 + ".";
     }
+
+    // =================================================================
+    // ADMINISTRATOR HELPERS
+    // =================================================================
 
     private UUID adminId(
             AdminUser administrator
@@ -339,8 +629,13 @@ public class CustomerReviewMapper {
                         administrator.getLastName()
                 );
 
-        if (firstName != null && lastName != null) {
-            return firstName + " " + lastName;
+        if (
+                firstName != null
+                        && lastName != null
+        ) {
+            return firstName
+                    + " "
+                    + lastName;
         }
 
         if (firstName != null) {
@@ -356,6 +651,10 @@ public class CustomerReviewMapper {
         );
     }
 
+    // =================================================================
+    // NORMALIZATION
+    // =================================================================
+
     private String normalizeOptional(
             String value
     ) {
@@ -363,7 +662,8 @@ public class CustomerReviewMapper {
             return null;
         }
 
-        String normalized = value.trim();
+        String normalized =
+                value.trim();
 
         return normalized.isEmpty()
                 ? null

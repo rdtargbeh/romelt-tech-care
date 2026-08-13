@@ -17,7 +17,4 @@ public enum NotificationRecipientType {
 
     BUSINESS_CONTACT,
 
-    SYSTEM,
-
-    CUSTOM
 }

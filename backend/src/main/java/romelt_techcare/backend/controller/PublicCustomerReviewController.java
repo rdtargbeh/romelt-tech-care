@@ -33,13 +33,52 @@ import java.util.List;
  * ================================================================
  *
  * Purpose:
- * Supports secure verified-review submission and exposes approved
- * public customer reviews to the React website.
+ * Supports secure verified customer-review submission and exposes
+ * approved, published customer reviews to the public React website.
+ *
+ * Core review rule:
+ * Every review submitted through this controller represents feedback
+ * about the completed service associated with a secure review
+ * invitation.
+ *
+ * Service relationship:
+ *
+ * review token
+ *      -> CustomerReviewInvitation
+ *          -> BookingRequest
+ *              -> customerId
+ *              -> serviceId
+ *
+ * The browser does NOT select the booking, customer, or service.
+ *
+ * CustomerReviewService resolves all authoritative service/customer
+ * information from the invitation and completed booking.
+ *
+ * Public submission controls only:
+ * - display preference;
+ * - optional display name;
+ * - review title;
+ * - review text;
+ * - rating;
+ * - optional customer photo;
+ * - consent confirmation;
+ * - consent version.
+ *
+ * Backend-derived values:
+ * - BookingRequest
+ * - customer identity
+ * - customer email
+ * - service
+ * - review source = BOOKING_FOLLOW_UP
+ * - verified-customer status = true
  *
  * Security:
- * - Review submission responses are not cached.
- * - Public review responses exclude customer contact information,
- *   consent evidence, IP addresses, and moderation details.
+ * - Review submission responses are never cached.
+ * - Public review responses exclude private customer contact
+ *   information, consent evidence, IP addresses, user agents,
+ *   moderation details, and internal administrator information.
+ * - Customer/service identity is never accepted from the public
+ *   browser request.
  *
  * Base endpoint:
  * /api/v1/public/customer-reviews
@@ -53,13 +92,26 @@ public class PublicCustomerReviewController {
     private static final Duration PUBLIC_CACHE_DURATION =
             Duration.ofMinutes(5);
 
-    private final CustomerReviewService customerReviewService;
+    private final CustomerReviewService
+            customerReviewService;
 
-    private final CustomerReviewMapper customerReviewMapper;
+    private final CustomerReviewMapper
+            customerReviewMapper;
 
+    // =================================================================
+    // SUBMIT VERIFIED CUSTOMER REVIEW
+    // =================================================================
+
+    /**
+     * Submits a customer review using a secure review invitation.
+     *
+     * The service being reviewed is resolved exclusively from the
+     * booking associated with the invitation.
+     */
     @PostMapping
-    public ResponseEntity<ApiResponse<PublicCustomerReviewResponse>>
-    submitReview(
+    public ResponseEntity<
+            ApiResponse<PublicCustomerReviewResponse>
+            > submitReview(
             @Valid
             @RequestBody
             CustomerReviewPublicSubmissionRequest request,
@@ -74,37 +126,62 @@ public class PublicCustomerReviewController {
                         .reviewerDisplayPreference(
                                 request.reviewerDisplayPreference()
                         )
-                        .reviewTitle(request.reviewTitle())
-                        .reviewText(request.reviewText())
-                        .rating(request.rating())
+                        .reviewTitle(
+                                request.reviewTitle()
+                        )
+                        .reviewText(
+                                request.reviewText()
+                        )
+                        .rating(
+                                request.rating()
+                        )
                         .customerConsentConfirmed(
                                 request.customerConsentConfirmed()
                         )
                         .build();
 
         CustomerReview review =
-                customerReviewService.submitVerifiedReview(
-                        request.token(),
-                        requestedReview,
-                        request.serviceId(),
-                        request.customerPhotoMediaId(),
-                        request.customerConsentVersion(),
-                        resolveClientIp(httpRequest),
-                        httpRequest.getHeader("User-Agent")
-                );
+                customerReviewService
+                        .submitVerifiedReview(
+                                request.token(),
+
+                                requestedReview,
+
+                                request.customerPhotoMediaId(),
+
+                                request.customerConsentVersion(),
+
+                                resolveClientIp(
+                                        httpRequest
+                                ),
+
+                                httpRequest.getHeader(
+                                        "User-Agent"
+                                )
+                        );
 
         return ResponseEntity
                 .status(HttpStatus.CREATED)
-                .cacheControl(CacheControl.noStore())
+                .cacheControl(
+                        CacheControl.noStore()
+                )
                 .body(
                         ApiResponse.success(
                                 "Thank you. Your review was submitted and is awaiting moderation.",
+
                                 customerReviewMapper
-                                        .toPublicResponse(review),
+                                        .toPublicResponse(
+                                                review
+                                        ),
+
                                 httpRequest.getRequestURI()
                         )
                 );
     }
+
+    // =================================================================
+    // PUBLIC REVIEW LIST
+    // =================================================================
 
     @GetMapping
     public ResponseEntity<
@@ -121,16 +198,21 @@ public class PublicCustomerReviewController {
     ) {
         Page<PublicCustomerReviewResponse> response =
                 customerReviewService
-                        .getPublicReviews(pageable)
+                        .getPublicReviews(
+                                pageable
+                        )
                         .map(
                                 customerReviewMapper
                                         ::toPublicResponse
                         );
 
-        return ResponseEntity.ok()
+        return ResponseEntity
+                .ok()
                 .cacheControl(
                         CacheControl
-                                .maxAge(PUBLIC_CACHE_DURATION)
+                                .maxAge(
+                                        PUBLIC_CACHE_DURATION
+                                )
                                 .cachePublic()
                 )
                 .body(
@@ -141,6 +223,10 @@ public class PublicCustomerReviewController {
                         )
                 );
     }
+
+    // =================================================================
+    // FEATURED REVIEWS
+    // =================================================================
 
     @GetMapping("/featured")
     public ResponseEntity<
@@ -158,10 +244,13 @@ public class PublicCustomerReviewController {
                         )
                         .toList();
 
-        return ResponseEntity.ok()
+        return ResponseEntity
+                .ok()
                 .cacheControl(
                         CacheControl
-                                .maxAge(PUBLIC_CACHE_DURATION)
+                                .maxAge(
+                                        PUBLIC_CACHE_DURATION
+                                )
                                 .cachePublic()
                 )
                 .body(
@@ -173,6 +262,17 @@ public class PublicCustomerReviewController {
                 );
     }
 
+    // =================================================================
+    // PUBLIC REVIEWS BY SERVICE
+    // =================================================================
+
+    /**
+     * Returns publicly visible reviews associated with one website
+     * service.
+     *
+     * The review-service relationship was established from each
+     * completed booking when the review was originally created.
+     */
     @GetMapping("/service/{serviceSlug}")
     public ResponseEntity<
             ApiResponse<Page<PublicCustomerReviewResponse>>
@@ -200,10 +300,13 @@ public class PublicCustomerReviewController {
                                         ::toPublicResponse
                         );
 
-        return ResponseEntity.ok()
+        return ResponseEntity
+                .ok()
                 .cacheControl(
                         CacheControl
-                                .maxAge(PUBLIC_CACHE_DURATION)
+                                .maxAge(
+                                        PUBLIC_CACHE_DURATION
+                                )
                                 .cachePublic()
                 )
                 .body(
@@ -215,6 +318,10 @@ public class PublicCustomerReviewController {
                 );
     }
 
+    // =================================================================
+    // RATING SUMMARY
+    // =================================================================
+
     @GetMapping("/rating-summary")
     public ResponseEntity<
             ApiResponse<CustomerReviewRatingSummaryResponse>
@@ -225,10 +332,13 @@ public class PublicCustomerReviewController {
                 customerReviewService
                         .getPublicRatingSummary();
 
-        return ResponseEntity.ok()
+        return ResponseEntity
+                .ok()
                 .cacheControl(
                         CacheControl
-                                .maxAge(PUBLIC_CACHE_DURATION)
+                                .maxAge(
+                                        PUBLIC_CACHE_DURATION
+                                )
                                 .cachePublic()
                 )
                 .body(
@@ -240,21 +350,41 @@ public class PublicCustomerReviewController {
                 );
     }
 
+    // =================================================================
+    // CLIENT IP HELPER
+    // =================================================================
+
+    /**
+     * Resolves the originating client IP used for review-submission
+     * consent/audit evidence.
+     *
+     * Deployment note:
+     * X-Forwarded-For should only be trusted when Romelt TechCare is
+     * deployed behind a trusted reverse proxy that overwrites or
+     * controls that header.
+     */
     private String resolveClientIp(
             HttpServletRequest request
     ) {
         String forwardedFor =
-                request.getHeader("X-Forwarded-For");
+                request.getHeader(
+                        "X-Forwarded-For"
+                );
 
         if (
                 forwardedFor != null
                         && !forwardedFor.isBlank()
         ) {
             String firstAddress =
-                    forwardedFor.split(",")[0].trim();
+                    forwardedFor
+                            .split(",")[0]
+                            .trim();
 
             return firstAddress.length() > 64
-                    ? firstAddress.substring(0, 64)
+                    ? firstAddress.substring(
+                    0,
+                    64
+            )
                     : firstAddress;
         }
 
@@ -266,7 +396,10 @@ public class PublicCustomerReviewController {
         }
 
         return remoteAddress.length() > 64
-                ? remoteAddress.substring(0, 64)
+                ? remoteAddress.substring(
+                0,
+                64
+        )
                 : remoteAddress;
     }
 }

@@ -10,20 +10,35 @@
  * Responsibilities:
  * - Welcomes the authenticated administrator.
  * - Displays account and session information from real auth data.
- * - Clearly identifies operational modules awaiting backend APIs.
+ * - Provides direct access to administrator operational modules.
+ * - Routes administrators to customer management.
+ * - Routes administrators to customer-review management.
+ * - Routes administrators to booking management.
+ * - Routes administrators to contact-inquiry management.
+ * - Routes administrators to service management.
  * - Provides access to available account-security actions.
- * - Avoids displaying fabricated booking, inquiry, or revenue totals.
+ * - Avoids displaying fabricated booking, inquiry, customer, or
+ *   revenue totals.
  *
  * Real-data integration:
+ *
  * Current administrator information is supplied by AdminAuthContext
  * and originates from:
  *
  * GET /api/v1/admin/auth/me
  *
+ * Operational routes:
+ *
+ * /admin/customers
+ * /admin/customers/reviews
+ * /admin/bookings
+ * /admin/contact-inquiries
+ * /admin/services
+ *
  * Production note:
  * Operational statistics are intentionally not mocked. Dashboard
- * totals should be added only after administrator booking, inquiry,
- * customer, and reporting endpoints exist.
+ * totals should be added only when the corresponding reporting APIs
+ * provide real aggregate values.
  * ================================================================
  */
 
@@ -33,18 +48,30 @@ import {
   Clock3,
   KeyRound,
   Mail,
+  MessageSquareQuote,
   MessageSquareText,
   ShieldCheck,
   UserRound,
   Wrench,
 } from "lucide-react";
+
 import { Link, useLocation } from "react-router-dom";
+
 import AdminInformationCard from "@/components/admin/AdminInformationCard";
+
 import { useAdminAuth } from "@/hooks/useAdminAuth";
+
+// =====================================================================
+// LOCATION STATE
+// =====================================================================
 
 interface DashboardLocationState {
   passwordChanged?: boolean;
 }
+
+// =====================================================================
+// PAGE
+// =====================================================================
 
 export default function AdminDashboardPage() {
   const location = useLocation();
@@ -60,6 +87,10 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="mx-auto max-w-7xl">
+      {/* =============================================================
+       * PASSWORD SUCCESS
+       * ============================================================= */}
+
       {locationState?.passwordChanged && (
         <div
           className="mb-6 flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-4 text-emerald-900"
@@ -81,6 +112,10 @@ export default function AdminDashboardPage() {
         </div>
       )}
 
+      {/* =============================================================
+       * HERO
+       * ============================================================= */}
+
       <section className="overflow-hidden rounded-3xl bg-navy-950 px-5 py-7 text-white shadow-sm sm:px-8 sm:py-9">
         <div className="flex flex-col gap-7 lg:flex-row lg:items-center lg:justify-between">
           <div className="max-w-3xl">
@@ -93,9 +128,9 @@ export default function AdminDashboardPage() {
             </h1>
 
             <p className="mt-4 max-w-2xl leading-7 text-slate-300">
-              Your secure administrator workspace is active. Customer request
-              management modules will be connected as their protected backend
-              endpoints are implemented.
+              Your secure administrator workspace is active. Use the operational
+              modules below to manage customers, customer reviews, bookings,
+              inquiries, and Romelt TechCare services.
             </p>
           </div>
 
@@ -110,6 +145,10 @@ export default function AdminDashboardPage() {
           </div>
         </div>
       </section>
+
+      {/* =============================================================
+       * ACCOUNT SUMMARY
+       * ============================================================= */}
 
       <section
         className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4"
@@ -141,6 +180,10 @@ export default function AdminDashboardPage() {
         />
       </section>
 
+      {/* =============================================================
+       * OPERATIONS
+       * ============================================================= */}
+
       <section className="mt-8">
         <div>
           <p className="text-sm font-bold uppercase tracking-[0.18em] text-brand-700">
@@ -152,31 +195,82 @@ export default function AdminDashboardPage() {
           </h2>
 
           <p className="mt-2 max-w-3xl leading-7 text-slate-600">
-            These workspaces will become active after their secured
-            administrator APIs are added to the Spring Boot backend.
+            Open a management workspace to review and manage Romelt TechCare
+            customers, customer reviews, service requests, inquiries, and
+            service offerings.
           </p>
         </div>
 
-        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <AdminInformationCard
-            icon={<CalendarDays className="h-5 w-5" aria-hidden="true" />}
-            title="Booking management"
-            description="Review service requests, update appointment status, assign technicians, and coordinate scheduling."
-          />
+        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+          {/* =========================================================
+           * CUSTOMERS
+           * ========================================================= */}
 
-          <AdminInformationCard
-            icon={<MessageSquareText className="h-5 w-5" aria-hidden="true" />}
-            title="Contact inquiries"
-            description="Review customer messages, track responses, record follow-up activity, and close resolved inquiries."
-          />
+          <ManagementModuleLink to="/admin/customers">
+            <AdminInformationCard
+              icon={<UserRound className="h-5 w-5" aria-hidden="true" />}
+              title="Customer management"
+              description="Search customer profiles, review contact information, view customer activity, and manage reusable customer records."
+            />
+          </ManagementModuleLink>
 
-          <AdminInformationCard
-            icon={<Wrench className="h-5 w-5" aria-hidden="true" />}
-            title="Service management"
-            description="Maintain the service catalog, pricing guidance, availability, and public service descriptions."
-          />
+          {/* =========================================================
+           * CUSTOMER REVIEWS
+           * ========================================================= */}
+
+          <ManagementModuleLink to="/admin/customers/reviews">
+            <AdminInformationCard
+              icon={
+                <MessageSquareQuote className="h-5 w-5" aria-hidden="true" />
+              }
+              title="Customer reviews"
+              description="Review customer feedback, moderate submitted reviews, record customer-authorized feedback, manage publication, and respond to published reviews."
+            />
+          </ManagementModuleLink>
+
+          {/* =========================================================
+           * BOOKINGS
+           * ========================================================= */}
+
+          <ManagementModuleLink to="/admin/bookings">
+            <AdminInformationCard
+              icon={<CalendarDays className="h-5 w-5" aria-hidden="true" />}
+              title="Booking management"
+              description="Review service requests, update appointment status, assign technicians, and coordinate scheduling."
+            />
+          </ManagementModuleLink>
+
+          {/* =========================================================
+           * CONTACT INQUIRIES
+           * ========================================================= */}
+
+          <ManagementModuleLink to="/admin/contact-inquiries">
+            <AdminInformationCard
+              icon={
+                <MessageSquareText className="h-5 w-5" aria-hidden="true" />
+              }
+              title="Contact inquiries"
+              description="Review customer messages, track responses, record follow-up activity, and close resolved inquiries."
+            />
+          </ManagementModuleLink>
+
+          {/* =========================================================
+           * SERVICES
+           * ========================================================= */}
+
+          <ManagementModuleLink to="/admin/services">
+            <AdminInformationCard
+              icon={<Wrench className="h-5 w-5" aria-hidden="true" />}
+              title="Service management"
+              description="Maintain the service catalog, pricing guidance, availability, and public service descriptions."
+            />
+          </ManagementModuleLink>
         </div>
       </section>
+
+      {/* =============================================================
+       * ACCOUNT STATUS
+       * ============================================================= */}
 
       <section className="mt-8 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm sm:p-7">
         <div className="flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
@@ -227,10 +321,38 @@ export default function AdminDashboardPage() {
   );
 }
 
+// =====================================================================
+// MANAGEMENT MODULE LINK
+// =====================================================================
+
+interface ManagementModuleLinkProps {
+  to: string;
+
+  children: React.ReactNode;
+}
+
+function ManagementModuleLink({ to, children }: ManagementModuleLinkProps) {
+  return (
+    <Link
+      to={to}
+      className="focus-ring block rounded-2xl transition hover:-translate-y-0.5 hover:shadow-md"
+    >
+      {children}
+    </Link>
+  );
+}
+
+// =====================================================================
+// ACCOUNT SUMMARY CARD
+// =====================================================================
+
 interface AccountSummaryCardProps {
   icon: React.ReactNode;
+
   label: string;
+
   value: string;
+
   breakValue?: boolean;
 }
 
@@ -261,8 +383,13 @@ function AccountSummaryCard({
   );
 }
 
+// =====================================================================
+// ACCOUNT DETAIL
+// =====================================================================
+
 interface AccountDetailProps {
   term: string;
+
   description: string;
 }
 
@@ -278,6 +405,10 @@ function AccountDetail({ term, description }: AccountDetailProps) {
   );
 }
 
+// =====================================================================
+// ROLE FORMATTER
+// =====================================================================
+
 function formatRole(role: string | undefined): string {
   if (!role) {
     return "Administrator";
@@ -285,6 +416,10 @@ function formatRole(role: string | undefined): string {
 
   return role.toLowerCase().split("_").map(capitalize).join(" ");
 }
+
+// =====================================================================
+// STATUS FORMATTER
+// =====================================================================
 
 function formatStatus(status: string | undefined): string {
   if (!status) {
@@ -294,6 +429,10 @@ function formatStatus(status: string | undefined): string {
   return status.toLowerCase().split("_").map(capitalize).join(" ");
 }
 
+// =====================================================================
+// CAPITALIZE
+// =====================================================================
+
 function capitalize(value: string): string {
   if (!value) {
     return value;
@@ -301,6 +440,10 @@ function capitalize(value: string): string {
 
   return `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 }
+
+// =====================================================================
+// DATE FORMATTER
+// =====================================================================
 
 function formatDateTime(value: string | null | undefined): string {
   if (!value) {

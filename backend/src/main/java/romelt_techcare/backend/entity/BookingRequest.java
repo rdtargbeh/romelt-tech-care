@@ -163,11 +163,7 @@ public class BookingRequest {
 
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    @Column(
-            name = "booking_request_id",
-            nullable = false,
-            updatable = false
-    )
+    @Column(name = "booking_request_id", nullable = false, updatable = false)
     private UUID bookingRequestId;
 
     /**
@@ -179,13 +175,11 @@ public class BookingRequest {
     @Column(name = "customer_id")
     private UUID customerId;
 
-    @Column(name = "reference_number", nullable = false, unique = true,
-            updatable = false, length = 40)
+    @Column(name = "reference_number", nullable = false, unique = true, updatable = false, length = 40)
     private String referenceNumber;
 
     @Enumerated(EnumType.STRING)
-    @Column(name = "booking_for", nullable = false,
-            length = 20, columnDefinition = "varchar(20) default 'PERSONAL'")
+    @Column(name = "booking_for", nullable = false, length = 20, columnDefinition = "varchar(20) default 'PERSONAL'")
     private BookingFor bookingFor;
 
     // ================================================================

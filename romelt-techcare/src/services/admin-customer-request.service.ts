@@ -4,30 +4,33 @@
  * ================================================================
  *
  * Purpose:
- * Connects administrator booking and contact-inquiry pages to the
- * authenticated backend APIs.
+ * Provides authenticated frontend API operations for customer booking
+ * requests and contact inquiries.
  *
  * Responsibilities:
  * - Retrieves paginated booking requests.
- * - Retrieves one booking request.
- * - Creates a booking for a client.
- * - Updates booking status.
- * - Retrieves paginated contact inquiries.
+ * - Retrieves one complete booking.
+ * - Creates administrator-entered bookings.
+ * - Updates booking lifecycle status.
+ * - Retrieves contact inquiries.
  * - Retrieves one contact inquiry.
- * - Updates contact-inquiry status.
- *
- * Security:
- * All administrator operations require the stored administrator JWT.
+ * - Updates inquiry lifecycle status.
  *
  * Real-data integration:
+ *
+ * Booking:
  * GET   /api/v1/admin/booking-requests
  * GET   /api/v1/admin/booking-requests/{bookingRequestId}
  * POST  /api/v1/admin/booking-requests
  * PATCH /api/v1/admin/booking-requests/{bookingRequestId}/status
  *
+ * Contact:
  * GET   /api/v1/admin/contact-inquiries
  * GET   /api/v1/admin/contact-inquiries/{contactInquiryId}
  * PATCH /api/v1/admin/contact-inquiries/{contactInquiryId}/status
+ *
+ * Authentication:
+ * All operations in this file require the administrator JWT.
  * ================================================================
  */
 
@@ -42,19 +45,34 @@ import type {
   PageResponse,
 } from "@/types/admin-customer-request.types";
 
-const ADMIN_BOOKING_ENDPOINT = "/admin/booking-requests";
-const ADMIN_CONTACT_ENDPOINT = "/admin/contact-inquiries";
+// =====================================================================
+// ENDPOINTS
+// =====================================================================
+
+const ADMIN_BOOKING_REQUESTS_ENDPOINT = "/admin/booking-requests";
+
+const ADMIN_CONTACT_INQUIRIES_ENDPOINT = "/admin/contact-inquiries";
+
+// =====================================================================
+// BOOKINGS
+// =====================================================================
 
 /**
- * Retrieves paginated booking requests.
+ * Returns paginated booking requests.
  */
-export async function getAdminBookingRequests(
+export function getAdminBookingRequests(
   page = 0,
   size = 10,
   signal?: AbortSignal,
 ): Promise<PageResponse<AdminBookingRequest>> {
+  const searchParams = new URLSearchParams();
+
+  searchParams.set("page", String(page));
+
+  searchParams.set("size", String(size));
+
   return apiClient.get<PageResponse<AdminBookingRequest>>(
-    `${ADMIN_BOOKING_ENDPOINT}?page=${page}&size=${size}&sort=submittedAt,desc`,
+    `${ADMIN_BOOKING_REQUESTS_ENDPOINT}?${searchParams.toString()}`,
     {
       signal,
       requireAuthentication: true,
@@ -63,14 +81,19 @@ export async function getAdminBookingRequests(
 }
 
 /**
- * Retrieves one complete booking request.
+ * Returns one complete booking request.
  */
-export async function getAdminBookingRequest(
+export function getAdminBookingRequest(
   bookingRequestId: string,
   signal?: AbortSignal,
 ): Promise<AdminBookingRequest> {
+  const normalizedId = requireIdentifier(
+    bookingRequestId,
+    "Booking request ID",
+  );
+
   return apiClient.get<AdminBookingRequest>(
-    `${ADMIN_BOOKING_ENDPOINT}/${encodeURIComponent(bookingRequestId)}`,
+    `${ADMIN_BOOKING_REQUESTS_ENDPOINT}/${encodeURIComponent(normalizedId)}`,
     {
       signal,
       requireAuthentication: true,
@@ -79,46 +102,75 @@ export async function getAdminBookingRequest(
 }
 
 /**
- * Creates a booking for a client on behalf of an administrator.
- *
- * The request payload type is inferred from the payload argument.
- * The single generic type represents the API response.
+ * Creates an administrator-entered booking.
  */
-export async function createAdminBookingRequest(
-  payload: AdminBookingRequestCreatePayload,
+export function createAdminBookingRequest(
+  request: AdminBookingRequestCreatePayload,
+  signal?: AbortSignal,
 ): Promise<AdminBookingRequest> {
-  return apiClient.post<AdminBookingRequest>(ADMIN_BOOKING_ENDPOINT, payload, {
-    requireAuthentication: true,
-  });
-}
+  if (!request) {
+    throw new Error("Booking request information is required.");
+  }
 
-/**
- * Updates the operational status and optional administrator notes for
- * an existing booking request.
- */
-export async function updateAdminBookingStatus(
-  bookingRequestId: string,
-  payload: AdminBookingStatusUpdatePayload,
-): Promise<AdminBookingRequest> {
-  return apiClient.patch<AdminBookingRequest>(
-    `${ADMIN_BOOKING_ENDPOINT}/${encodeURIComponent(bookingRequestId)}/status`,
-    payload,
+  return apiClient.post<AdminBookingRequest>(
+    ADMIN_BOOKING_REQUESTS_ENDPOINT,
+    request,
     {
+      signal,
       requireAuthentication: true,
     },
   );
 }
 
 /**
- * Retrieves paginated contact inquiries.
+ * Updates one booking lifecycle status.
  */
-export async function getAdminContactInquiries(
+export function updateAdminBookingStatus(
+  bookingRequestId: string,
+  request: AdminBookingStatusUpdatePayload,
+  signal?: AbortSignal,
+): Promise<AdminBookingRequest> {
+  const normalizedId = requireIdentifier(
+    bookingRequestId,
+    "Booking request ID",
+  );
+
+  if (!request) {
+    throw new Error("Booking status information is required.");
+  }
+
+  return apiClient.patch<AdminBookingRequest>(
+    `${ADMIN_BOOKING_REQUESTS_ENDPOINT}/${encodeURIComponent(
+      normalizedId,
+    )}/status`,
+    request,
+    {
+      signal,
+      requireAuthentication: true,
+    },
+  );
+}
+
+// =====================================================================
+// CONTACT INQUIRIES
+// =====================================================================
+
+/**
+ * Returns paginated contact inquiries.
+ */
+export function getAdminContactInquiries(
   page = 0,
   size = 10,
   signal?: AbortSignal,
 ): Promise<PageResponse<AdminContactInquiry>> {
+  const searchParams = new URLSearchParams();
+
+  searchParams.set("page", String(page));
+
+  searchParams.set("size", String(size));
+
   return apiClient.get<PageResponse<AdminContactInquiry>>(
-    `${ADMIN_CONTACT_ENDPOINT}?page=${page}&size=${size}&sort=submittedAt,desc`,
+    `${ADMIN_CONTACT_INQUIRIES_ENDPOINT}?${searchParams.toString()}`,
     {
       signal,
       requireAuthentication: true,
@@ -127,14 +179,19 @@ export async function getAdminContactInquiries(
 }
 
 /**
- * Retrieves one complete contact inquiry.
+ * Returns one complete contact inquiry.
  */
-export async function getAdminContactInquiry(
+export function getAdminContactInquiry(
   contactInquiryId: string,
   signal?: AbortSignal,
 ): Promise<AdminContactInquiry> {
+  const normalizedId = requireIdentifier(
+    contactInquiryId,
+    "Contact inquiry ID",
+  );
+
   return apiClient.get<AdminContactInquiry>(
-    `${ADMIN_CONTACT_ENDPOINT}/${encodeURIComponent(contactInquiryId)}`,
+    `${ADMIN_CONTACT_INQUIRIES_ENDPOINT}/${encodeURIComponent(normalizedId)}`,
     {
       signal,
       requireAuthentication: true,
@@ -143,17 +200,44 @@ export async function getAdminContactInquiry(
 }
 
 /**
- * Updates the operational status of an existing contact inquiry.
+ * Updates one contact-inquiry lifecycle status.
  */
-export async function updateAdminContactInquiryStatus(
+export function updateAdminContactInquiryStatus(
   contactInquiryId: string,
-  payload: AdminContactInquiryStatusUpdatePayload,
+  request: AdminContactInquiryStatusUpdatePayload,
+  signal?: AbortSignal,
 ): Promise<AdminContactInquiry> {
+  const normalizedId = requireIdentifier(
+    contactInquiryId,
+    "Contact inquiry ID",
+  );
+
+  if (!request) {
+    throw new Error("Contact inquiry status information is required.");
+  }
+
   return apiClient.patch<AdminContactInquiry>(
-    `${ADMIN_CONTACT_ENDPOINT}/${encodeURIComponent(contactInquiryId)}/status`,
-    payload,
+    `${ADMIN_CONTACT_INQUIRIES_ENDPOINT}/${encodeURIComponent(
+      normalizedId,
+    )}/status`,
+    request,
     {
+      signal,
       requireAuthentication: true,
     },
   );
+}
+
+// =====================================================================
+// HELPERS
+// =====================================================================
+
+function requireIdentifier(value: string, label: string): string {
+  const normalized = value?.trim();
+
+  if (!normalized) {
+    throw new Error(`${label} is required.`);
+  }
+
+  return normalized;
 }

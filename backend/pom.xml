@@ -141,6 +141,14 @@ Design:
 			<optional>true</optional>
 		</dependency>
 
+		<!-- ==========================================================
+     SPRING MAIL
+     ========================================================== -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-mail</artifactId>
+		</dependency>
+
 		<!-- ===================================================== -->
 		<!-- TEST -->
 		<!-- ===================================================== -->
@@ -155,6 +163,34 @@ Design:
 			<groupId>org.springframework.security</groupId>
 			<artifactId>spring-security-test</artifactId>
 			<scope>test</scope>
+		</dependency>
+
+		<!-- ================================================================
+     ROMELT TECHCARE — NOTIFICATION PROVIDER DEPENDENCIES
+     ================================================================ -->
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<dependency>
+			<groupId>com.twilio.sdk</groupId>
+			<artifactId>twilio</artifactId>
+			<version>12.1.1</version>
+		</dependency>
+
+		<!-- ================================================================
+     SPRING WEBSOCKET + STOMP
+     ================================================================ -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-websocket</artifactId>
 		</dependency>
 
 	</dependencies>

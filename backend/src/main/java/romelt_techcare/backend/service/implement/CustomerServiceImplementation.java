@@ -1003,30 +1003,35 @@ public class CustomerServiceImplementation implements CustomerService {
         );
     }
 
+
     private void validateNoConflictingExistingCustomer(
             String normalizedEmail,
             String normalizedPhone
     ) {
         Optional<Customer> emailMatch =
-                findByNormalizedEmail(
-                        normalizedEmail
-                );
+                findByNormalizedEmail(normalizedEmail);
 
-        Optional<Customer> phoneMatch =
-                findByNormalizedPhone(
-                        normalizedPhone
-                );
-
-        if (
-                emailMatch.isPresent()
-                        || phoneMatch.isPresent()
-        ) {
+        if (emailMatch.isPresent()) {
             reject(
                     HttpStatus.CONFLICT,
-                    "A customer already exists with the supplied email address or telephone number."
+                    "A customer already exists with this email address: "
+                            + emailMatch.get().getPrimaryEmail()
+            );
+        }
+
+
+        Optional<Customer> phoneMatch =
+                findByNormalizedPhone(normalizedPhone);
+
+        if (phoneMatch.isPresent()) {
+            reject(
+                    HttpStatus.CONFLICT,
+                    "A customer already exists with this telephone number: "
+                            + phoneMatch.get().getPrimaryPhone()
             );
         }
     }
+
 
     private void validateUpdateContactUniqueness(
             Customer customer,
